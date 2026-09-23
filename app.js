@@ -11,7 +11,10 @@ const CACHE_NAME = 'reel-video-cache-v1';
 // ---------------------------------------------------------------------
 const CONFIG = {
   clientId: 'TkhiM2N1SXJ3RC1CZ2dhMnEtZ246MTpjaQ',              // from X Developer Portal (OAuth 2.0, "public client" type enables PKCE without a secret)
-  redirectUri: window.location.origin + window.location.pathname, // must match the callback URL registered in the portal
+  // Must match the Callback URI in the X portal BYTE FOR BYTE, e.g.
+  // https://USERNAME.github.io/reel-app/  (with trailing slash, no index.html).
+  // Computed so that opening .../reel-app/index.html still yields the canonical URL.
+  redirectUri: window.location.origin + window.location.pathname.replace(/index\.html$/, '').replace(/([^/])$/, '$1/'),
   authEndpoint: 'https://x.com/i/oauth2/authorize',
   apiBase: 'https://x-proxy.soheil-sptfy.workers.dev', // Cloudflare Worker proxy (NO trailing slash)
   tokenEndpoint: 'https://x-proxy.soheil-sptfy.workers.dev/2/oauth2/token',
@@ -88,6 +91,22 @@ async function sha256(str) {
 }
 
 async function startLogin() {
+  try {
+    await startLoginInner();
+  } catch (e) {
+    console.error(e);
+    alert('خطا در شروع ورود: ' + e.message);
+  }
+}
+
+async function startLoginInner() {
+  if (location.protocol !== 'https:') {
+    throw new Error('ورود X فقط روی آدرس https (همون GitHub Pages) کار می‌کنه، نه با باز کردن فایل روی کامپیوتر. آدرس فعلی: ' + location.href);
+  }
+  if (!crypto.subtle) throw new Error('crypto.subtle در این مرورگر/حالت در دسترس نیست');
+  if (new URLSearchParams(location.search).has('debug')) {
+    alert('redirect_uri که ارسال میشه:\n' + CONFIG.redirectUri + '\n\nباید دقیقاً همین در X Developer Portal ثبت شده باشه.');
+  }
   const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const challenge = base64url(await sha256(verifier));
   const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
