@@ -564,6 +564,7 @@ async function loadVariant(index, resumeAt = 0) {
   const variant = currentVideo.variants[index];
   const videoEl = el('video-el');
   const cachedUrl = await getCachedUrl(variant.url);
+  videoEl.referrerPolicy = 'no-referrer'; // belt-and-suspenders alongside the HTML attribute
   videoEl.src = cachedUrl || variant.url;
   videoEl.currentTime = resumeAt;
   videoEl.play().catch((e) => console.warn('autoplay blocked or failed:', e.message));
@@ -600,8 +601,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const variant = currentVideo.variants[currentVariantIndex];
     const cache = await caches.open(CACHE_NAME);
     el('cache-btn').textContent = 'در حال ذخیره…';
-    try { await cache.add(variant.url); el('cache-btn').textContent = 'ذخیره‌شده ✓'; }
-    catch (e) { el('cache-btn').textContent = 'خطا در ذخیره'; console.error('cache.add failed:', e); }
+    try {
+      // cache.add(url) fetches with the page's default referrer policy,
+      // which triggers the same 403 from video.twimg.com as the plain
+      // <video> tag did — so fetch explicitly with no-referrer first,
+      // then store that response under the plain URL as the cache key.
+      const res = await fetch(new Request(variant.url, { referrerPolicy: 'no-referrer' }));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      await cache.put(variant.url, res);
+      el('cache-btn').textContent = 'ذخیره‌شده ✓';
+    } catch (e) { el('cache-btn').textContent = 'خطا در ذخیره'; console.error('cache save failed:', e); }
   });
 });
 
