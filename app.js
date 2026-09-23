@@ -307,6 +307,19 @@ function resFromUrl(url) {
   const m = String(url || '').match(/\/(\d{2,5})x(\d{2,5})\//);
   return m ? { w: +m[1], h: +m[2] } : null;
 }
+// Normalizes common broken-URL shapes seen from proxied/rewritten APIs:
+//  - protocol-relative "//video.twimg.com/..." → add "https:"
+//  - bare path "video.twimg.com/..." (no scheme at all) → add "https://"
+//  - relative path like "/video/..." with no host → resolve against apiBase
+// Anything already a normal absolute http(s) URL passes through untouched.
+function normalizeMediaUrl(u) {
+  if (!u) return u;
+  u = String(u).trim();
+  if (/^https?:\/\//i.test(u)) return u;
+  if (u.startsWith('//')) return 'https:' + u;
+  if (u.startsWith('/')) return CONFIG.apiBase.replace(/\/$/, '') + u;
+  return 'https://' + u;
+}
 function fxToRecord(st) {
   const v = (st.media?.videos || [])[0];
   if (!v) return null;
@@ -323,8 +336,8 @@ function fxToRecord(st) {
     return 'MP4';
   };
 
-  let variants = fmts.sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0)).map(f => ({ label: labelOf(f), bitrate: f.bitrate || 0, url: f.url }));
-  if (!variants.length && v.url) variants = [{ label: labelOf({ url: v.url, width: v.width, height: v.height, bitrate: 0 }), bitrate: 0, url: v.url }];
+  let variants = fmts.sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0)).map(f => ({ label: labelOf(f), bitrate: f.bitrate || 0, url: normalizeMediaUrl(f.url) }));
+  if (!variants.length && v.url) variants = [{ label: labelOf({ url: v.url, width: v.width, height: v.height, bitrate: 0 }), bitrate: 0, url: normalizeMediaUrl(v.url) }];
   if (!variants.length) return null;
 
   // If two variants still ended up with the same label (e.g. same
@@ -352,6 +365,7 @@ async function importLinks(text) {
         const res = await fetch(`${CONFIG.apiBase}${CONFIG.fxPath}${id}`);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const j = await res.json();
+        console.log('fx response for', id, j); // inspect in devtools if available
         const rec = fxToRecord(j.status || {});
         if (rec) added.push(rec); else noVideo++;
       } catch (e) { errors.push(`${id}: ${e.message}`); }
@@ -556,6 +570,10 @@ async function loadVariant(index, resumeAt = 0) {
   el('cache-btn').textContent = cachedUrl ? 'ذخیره‌شده ✓' : 'ذخیره برای آفلاین';
   const testLink = el('test-url-btn');
   if (testLink) testLink.href = variant.url;
+  // Show the raw URL on screen (selectable) — the fastest way to debug a
+  // bad/malformed URL from the Worker without needing browser devtools.
+  const dbg = el('debug-url');
+  if (dbg) dbg.textContent = 'URL: ' + String(variant.url);
 }
 
 function updateNetHint() {
