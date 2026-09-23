@@ -110,8 +110,8 @@ async function startLoginInner() {
   const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const challenge = base64url(await sha256(verifier));
   const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
-  sessionStorage.setItem('pkce_verifier', verifier);
-  sessionStorage.setItem('pkce_state', state);
+  localStorage.setItem('pkce_verifier', verifier);
+  localStorage.setItem('pkce_state', state);
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -131,7 +131,7 @@ async function startLoginInner() {
 // Worker / Vercel function) that just forwards this POST — it does NOT
 // need to hold a client secret since PKCE public clients don't use one.
 async function exchangeCodeForToken(code) {
-  const verifier = sessionStorage.getItem('pkce_verifier');
+  const verifier = localStorage.getItem('pkce_verifier');
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     client_id: CONFIG.clientId,
@@ -477,12 +477,22 @@ async function bootstrap() {
   // Handle OAuth callback (?code=...&state=...)
   const params = new URLSearchParams(window.location.search);
   if (params.has('code')) {
+    // Stored in localStorage (not sessionStorage) so the flow survives a new
+    // tab/window. Consumed exactly once: a duplicate load of the same callback
+    // URL finds nothing pending and is ignored silently.
+    const pendingState = localStorage.getItem('pkce_state');
     try {
-      if (params.get('state') !== sessionStorage.getItem('pkce_state')) throw new Error('state mismatch');
-      const token = await exchangeCodeForToken(params.get('code'));
-      saveTokens(token);
+      if (pendingState) {
+        if (params.get('state') !== pendingState) throw new Error('state mismatch');
+        const token = await exchangeCodeForToken(params.get('code'));
+        localStorage.removeItem('pkce_state');
+        localStorage.removeItem('pkce_verifier');
+        saveTokens(token);
+      }
     } catch (e) {
       console.error(e);
+      localStorage.removeItem('pkce_state');
+      localStorage.removeItem('pkce_verifier');
       alert('ورود ناموفق بود:\n' + String(e.message).slice(0, 400));
     } finally {
       window.history.replaceState({}, '', CONFIG.redirectUri); // strip ?code from URL
