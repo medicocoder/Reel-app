@@ -20,6 +20,9 @@ const CONFIG = {
   tokenEndpoint: 'https://x-proxy.soheil-sptfy.workers.dev/2/oauth2/token',
   // tweet.read is required by the bookmarks endpoint; without it you get 403
   scopes: ['tweet.read', 'bookmark.read', 'users.read', 'offline.access'],
+  // Expanding author usernames returns extra User objects, which X may bill
+  // separately (~$0.01 each). Off by default to keep sync cheap.
+  includeAuthors: false,
   maxPages: 8, // X returns at most ~800 bookmarks (8 pages x 100)
 };
 
@@ -184,7 +187,7 @@ async function xFetch(url, retry = true) {
     await refreshAccessToken();
     return xFetch(url, false);
   }
-  if (res.status === 429) throw new Error('Rate limited (429) — try again in 15 minutes');
+  if (res.status === 429) { const e = new Error('Rate limited (429)'); e.status = 429; throw e; }
   return res;
 }
 
@@ -202,16 +205,16 @@ function isLoggedIn() {
 // ---------------------------------------------------------------------
 async function fetchBookmarksFromX(userId, paginationToken = null) {
   const url = new URL(`${CONFIG.apiBase}/2/users/${userId}/bookmarks`);
-  url.searchParams.set('expansions', 'attachments.media_keys,author_id');
+  url.searchParams.set('expansions', CONFIG.includeAuthors ? 'attachments.media_keys,author_id' : 'attachments.media_keys');
   url.searchParams.set('media.fields', 'variants,type,duration_ms');
-  url.searchParams.set('tweet.fields', 'created_at,attachments,author_id');
-  url.searchParams.set('user.fields', 'username');
+  url.searchParams.set('tweet.fields', CONFIG.includeAuthors ? 'attachments,author_id' : 'attachments');
+  if (CONFIG.includeAuthors) url.searchParams.set('user.fields', 'username');
   url.searchParams.set('max_results', '100');
   // NOTE: the bookmarks endpoint does NOT support since_id. Only
   // max_results + pagination_token. Results are newest-first.
   if (paginationToken) url.searchParams.set('pagination_token', paginationToken);
   const res = await xFetch(url);
-  if (!res.ok) throw new Error('Bookmarks fetch failed: ' + res.status + ' ' + (await res.text()));
+  if (!res.ok) throw await httpError('Bookmarks fetch', res);
   return res.json(); // { data, includes: {media, users}, meta: {next_token} }
 }
 
@@ -237,7 +240,7 @@ function toVideoRecords(tweets, includes) {
     const username = users.get(t.author_id)?.username;
     out.push({
       id: t.id,
-      author: username ? '@' + username : '@unknown',
+      author: username ? '@' + username : 'ویدیوی X',
       text: t.text || '',
       tweetUrl: `https://x.com/${username || 'i'}/status/${t.id}`,
       variants,
@@ -276,31 +279,212 @@ async function syncBookmarks(userId) {
     localStorage.setItem('reel_seen_ids', JSON.stringify([...newSeen, ...seen]));
     localStorage.setItem('reel_video_store', JSON.stringify([...fresh, ...store]));
   }
-  return fresh.length; // number of new VIDEOS
+  return { videos: fresh.length, scanned: newSeen.length };
 }
 
 // --- data source: demo → mock, real login → synced store -------------
 function isDemo() { return localStorage.getItem('reel_access_token') === 'demo'; }
 
+function getVideoList() { // newest first
+  try { return JSON.parse(localStorage.getItem('reel_video_store') || '[]'); } catch { return []; }
+}
 function getAllVideos() {
   if (isDemo()) return MOCK_VIDEOS;
-  const list = JSON.parse(localStorage.getItem('reel_video_store') || '[]');
-  return Object.fromEntries(list.map(v => [v.id, v]));
+  return Object.fromEntries(getVideoList().map(v => [v.id, v]));
 }
 function getVideo(id) { return getAllVideos()[id]; }
 
+// --- user-defined folders (real mode only; demo keeps MOCK_FOLDERS) ---
+function loadCustomFolders() {
+  try { return JSON.parse(localStorage.getItem('reel_folders') || '[]'); } catch { return []; }
+}
+function saveCustomFolders(list) { localStorage.setItem('reel_folders', JSON.stringify(list)); }
+
 function loadFolderMap() {
   if (isDemo()) return MOCK_FOLDERS;
-  // TODO: user-defined folders. For now one automatic folder with everything.
-  return [{ id: 'all', name: 'همه ویدیوها', videos: Object.keys(getAllVideos()) }];
+  const list = getVideoList();
+  const known = new Set(list.map(v => v.id));
+  const custom = loadCustomFolders().map(f => ({ ...f, videos: f.videos.filter(id => known.has(id)) }));
+  return [{ id: 'all', name: 'همه ویدیوها', videos: list.map(v => v.id), builtin: true }, ...custom];
 }
 
-async function fetchMyUserId() {
-  const res = await xFetch(`${CONFIG.apiBase}/2/users/me`);
-  if (!res.ok) throw new Error('users/me failed: ' + res.status);
-  const data = await res.json();
-  localStorage.setItem('reel_user_id', data.data.id);
-  return data.data.id;
+function createFolder() {
+  const name = (prompt('اسم فولدر جدید:') || '').trim();
+  if (!name) return null;
+  const list = loadCustomFolders();
+  const f = { id: 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, videos: [] };
+  list.push(f);
+  saveCustomFolders(list);
+  renderFolders();
+  return f;
+}
+function renameFolder(id) {
+  const list = loadCustomFolders();
+  const f = list.find(x => x.id === id);
+  if (!f) return;
+  const name = (prompt('اسم جدید فولدر:', f.name) || '').trim();
+  if (!name) return;
+  f.name = name;
+  saveCustomFolders(list);
+  el('folder-title').textContent = name;
+  renderFolders();
+}
+function deleteFolder(id) {
+  const f = loadCustomFolders().find(x => x.id === id);
+  if (!f || !confirm(`فولدر «${f.name}» حذف بشه؟ (ویدیوها حذف نمیشن، فقط فولدر)`)) return;
+  saveCustomFolders(loadCustomFolders().filter(x => x.id !== id));
+  renderFolders();
+  el('back-to-folders').click();
+}
+function addToFolderFlow(videoId) {
+  let folders = loadCustomFolders();
+  const lines = folders.map((f, i) => `${i + 1}) ${f.name}`).join('\n');
+  const ans = prompt(`افزودن به کدوم فولدر؟ شماره رو بنویس:\n${lines}\n0) ساخت فولدر جدید`, folders.length ? '1' : '0');
+  if (ans === null) return;
+  const n = parseInt(ans, 10);
+  let target;
+  if (n === 0) {
+    const created = createFolder();
+    if (!created) return;
+    folders = loadCustomFolders();
+    target = folders.find(f => f.id === created.id);
+  } else {
+    target = folders[n - 1];
+  }
+  if (!target) return;
+  if (!target.videos.includes(videoId)) target.videos.unshift(videoId);
+  saveCustomFolders(folders);
+  renderFolders();
+  alert(`به «${target.name}» اضافه شد`);
+}
+function removeFromFolder(folderId, videoId) {
+  const folders = loadCustomFolders();
+  const f = folders.find(x => x.id === folderId);
+  if (!f) return;
+  f.videos = f.videos.filter(id => id !== videoId);
+  saveCustomFolders(folders);
+  renderFolders();
+  openFolder(folderId);
+}
+
+// --- errors, user info, sync ------------------------------------------
+async function httpError(label, res) {
+  const body = await res.text().catch(() => '');
+  const e = new Error(`${label} failed: ${res.status} ${body}`);
+  e.status = res.status;
+  e.body = body;
+  return e;
+}
+
+function explainError(e) {
+  const detail = String(e.body || e.message || e).slice(0, 250);
+  const hints = {
+    401: 'توکن معتبر نیست. خروج بزن و دوباره وارد شو.',
+    402: 'معمولاً یعنی اعتبار (credit) حساب توسعه‌دهنده‌ی X خریداری نشده یا تموم شده. توی developer.x.com بخش Billing/Credits رو ببین.',
+    403: 'دسترسی رد شد: احتمالاً اسکوپ، پلن/اعتبار API یا اینکه اپ داخل یک Project نیست.',
+    429: 'محدودیت تعداد درخواست. چند دقیقه بعد دوباره امتحان کن.',
+  };
+  return (hints[e.status] ? `خطا ${e.status}: ${hints[e.status]}\n` : '') + detail;
+}
+
+function showUsername() {
+  const name = localStorage.getItem('reel_username');
+  const root = el('app-screen');
+  if (!name || !root) return;
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = w.nextNode())) {
+    if (/\byou@\w*/.test(n.nodeValue)) n.nodeValue = n.nodeValue.replace(/\byou@\w*/, '@' + name);
+  }
+}
+
+async function ensureUser() {
+  let id = localStorage.getItem('reel_user_id');
+  if (!id || !localStorage.getItem('reel_username')) {
+    const res = await xFetch(`${CONFIG.apiBase}/2/users/me`);
+    if (!res.ok) throw await httpError('users/me', res);
+    const d = (await res.json()).data;
+    localStorage.setItem('reel_user_id', d.id);
+    localStorage.setItem('reel_username', d.username);
+    id = d.id;
+  }
+  showUsername();
+  return id;
+}
+
+let syncing = false;
+function setStatus(msg, isError = false) {
+  const st = el('sync-status');
+  if (!st) return;
+  st.textContent = msg;
+  st.style.color = isError ? '#e5484d' : '';
+}
+
+async function runSync() {
+  if (isDemo() || syncing) return;
+  syncing = true;
+  const btn = el('sync-btn');
+  if (btn) btn.disabled = true;
+  setStatus('در حال همگام‌سازی…');
+  try {
+    const userId = await ensureUser();
+    const r = await syncBookmarks(userId);
+    const total = getVideoList().length;
+    let msg = `همگام‌سازی شد — ${r.scanned} بوکمارک جدید بررسی شد، ${r.videos} ویدیوی جدید. مجموع: ${total} ویدیو.`;
+    if (r.scanned > 0 && total === 0) msg += '\nبوکمارک‌ها اومدن ولی ویدیوی مستقیم توشون نبود (ویدیوی داخل ریتوییت/نقل‌قول شمرده نمیشه).';
+    if (r.scanned === 0 && total === 0) msg += '\nX هیچ بوکمارکی برنگردوند.';
+    setStatus(msg);
+    renderFolders();
+  } catch (e) {
+    console.error(e);
+    setStatus(explainError(e), true);
+  } finally {
+    syncing = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Toolbar is injected from JS (no index.html change needed).
+const BTN_STYLE = 'background:none;color:inherit;border:1px solid rgba(128,128,128,.45);border-radius:10px;padding:6px 12px;font:inherit;font-size:13px;cursor:pointer';
+function ensureToolbar() {
+  let bar = el('reel-toolbar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'reel-toolbar';
+    bar.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px';
+    bar.innerHTML = `
+      <button id="new-folder-btn" style="${BTN_STYLE}">+ فولدر جدید</button>
+      <button id="sync-btn" style="${BTN_STYLE}">↻ همگام‌سازی</button>
+      <div id="sync-status" style="flex-basis:100%;font-size:12px;opacity:.85;white-space:pre-wrap"></div>`;
+    el('folder-grid').insertAdjacentElement('beforebegin', bar);
+    el('new-folder-btn').addEventListener('click', createFolder);
+    el('sync-btn').addEventListener('click', runSync);
+  }
+  const hide = isDemo();
+  el('new-folder-btn').style.display = hide ? 'none' : '';
+  el('sync-btn').style.display = hide ? 'none' : '';
+}
+
+function renderFolderActions() {
+  let box = el('folder-actions');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'folder-actions';
+    box.style.cssText = 'display:flex;gap:8px;margin:8px 0';
+    el('folder-title').insertAdjacentElement('afterend', box);
+  }
+  if (isDemo() || !currentFolder || currentFolder.builtin) { box.innerHTML = ''; return; }
+  box.innerHTML = `
+    <button id="rename-folder-btn" style="${BTN_STYLE}">تغییر نام</button>
+    <button id="delete-folder-btn" style="${BTN_STYLE}">حذف فولدر</button>`;
+  el('rename-folder-btn').onclick = () => renameFolder(currentFolder.id);
+  el('delete-folder-btn').onclick = () => deleteFolder(currentFolder.id);
+}
+
+function rowActionBtn(videoId) {
+  if (isDemo()) return '';
+  const remove = currentFolder && !currentFolder.builtin;
+  return `<button class="row-act" data-act="${remove ? 'remove' : 'add'}" data-id="${videoId}" style="${BTN_STYLE};padding:3px 8px;font-size:12px;margin-inline-start:auto">${remove ? '✕ حذف از فولدر' : '📁 افزودن به فولدر'}</button>`;
 }
 
 // ---------------------------------------------------------------------
@@ -315,6 +499,7 @@ const el = (id) => document.getElementById(id);
 function renderFolders() {
   const grid = el('folder-grid');
   const folders = loadFolderMap();
+  ensureToolbar();
   el('folder-total').textContent = `${folders.length} فولدر`;
   grid.innerHTML = folders.map(f => `
     <div class="folder-card" data-id="${f.id}">
@@ -332,6 +517,7 @@ async function openFolder(folderId) {
   const folders = loadFolderMap();
   currentFolder = folders.find(f => f.id === folderId);
   el('folder-title').textContent = currentFolder.name;
+  renderFolderActions();
   el('folders-view').classList.add('hidden');
   el('videos-view').classList.remove('hidden');
   el('player-screen').classList.remove('active');
@@ -346,13 +532,20 @@ async function openFolder(folderId) {
         <div class="video-meta">
           <div class="author">${esc(v.author)}</div>
           <div class="text">${esc(v.text)}</div>
-          <div class="meta-row"><span>${v.variants.length} کیفیت موجود</span></div>
+          <div class="meta-row"><span>${v.variants.length} کیفیت موجود</span>${rowActionBtn(v.id)}</div>
         </div>
       </div>`;
   }));
   list.innerHTML = rows.join('');
   list.querySelectorAll('.video-row').forEach(row => {
     row.addEventListener('click', () => openPlayer(row.dataset.id));
+  });
+  list.querySelectorAll('.row-act').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation(); // don't open the player
+      if (btn.dataset.act === 'add') addToFolderFlow(btn.dataset.id);
+      else removeFromFolder(currentFolder.id, btn.dataset.id);
+    });
   });
 }
 
@@ -460,7 +653,7 @@ el('demo-btn').addEventListener('click', () => {
   renderFolders();
 });
 el('logout-btn').addEventListener('click', () => {
-  ['reel_access_token', 'reel_refresh_token', 'reel_token_expires_at', 'reel_user_id']
+  ['reel_access_token', 'reel_refresh_token', 'reel_token_expires_at', 'reel_user_id', 'reel_username']
     .forEach(k => localStorage.removeItem(k));
   el('video-el')?.pause();
   el('player-screen').classList.remove('active');
@@ -504,17 +697,8 @@ async function bootstrap() {
     el('app-screen').classList.add('active');
     renderFolders();
 
-    // Real login (not demo mode) → sync on open, not on a timer.
-    if (!isDemo()) {
-      try {
-        const userId = localStorage.getItem('reel_user_id') || (await fetchMyUserId());
-        const newCount = await syncBookmarks(userId);
-        if (newCount) console.log(`${newCount} new video bookmark(s) synced`);
-        renderFolders(); // re-render with synced data
-      } catch (e) {
-        console.error('Sync failed:', e); // cached data still shows
-      }
-    }
+    // Real login (not demo mode) → sync once on open (manual button too).
+    if (!isDemo()) { showUsername(); runSync(); }
   }
 
   if ('serviceWorker' in navigator) {
