@@ -22,6 +22,9 @@ const CONFIG = {
   scopes: ['tweet.read', 'bookmark.read', 'users.read', 'offline.access'],
   // Expanding author usernames returns extra User objects, which X may bill
   // separately (~$0.01 each). Off by default to keep sync cheap.
+  // Official X API login needs paid credits. While you have none, keep this
+  // false: the API login button is hidden and old API sessions switch to free mode.
+  enableApiLogin: false,
   includeAuthors: false,
   // Free mode: video info comes from the public FxTwitter API through the
   // same Cloudflare Worker (add a /fx/ route there, see Worker code).
@@ -558,6 +561,8 @@ function ensureToolbar() {
     el('sync-btn').addEventListener('click', runSync);
     el('add-link-btn').addEventListener('click', addLinksFlow);
   }
+  const mode = isDemo() ? 'demo' : isLocal() ? 'local' : 'api';
+  if (bar.dataset.mode !== mode) { bar.dataset.mode = mode; setStatus(''); } // drop stale messages from another mode
   const hide = isDemo();
   el('new-folder-btn').style.display = hide ? 'none' : '';
   el('sync-btn').style.display = (hide || isLocal()) ? 'none' : ''; // API sync only in API mode
@@ -755,6 +760,7 @@ el('demo-btn').addEventListener('click', () => {
 (function addFreeModeButton() {
   const demo = el('demo-btn');
   if (!demo) return;
+  if (!CONFIG.enableApiLogin && el('login-btn')) el('login-btn').style.display = 'none';
   const b = document.createElement('button');
   b.id = 'free-btn';
   b.className = demo.className;
@@ -806,6 +812,12 @@ async function bootstrap() {
     } finally {
       window.history.replaceState({}, '', CONFIG.redirectUri); // strip ?code from URL
     }
+  }
+
+  // API login disabled → convert any leftover API session to free mode.
+  if (!CONFIG.enableApiLogin && isLoggedIn() && !isDemo() && !isLocal()) {
+    ['reel_refresh_token', 'reel_token_expires_at', 'reel_user_id', 'reel_username'].forEach(k => localStorage.removeItem(k));
+    localStorage.setItem('reel_access_token', 'local');
   }
 
   // ?add=<tweet url> (from an iOS Shortcut / share sheet) → free mode import
