@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reel — بایگانی ویدیوهای بوکمارک‌شده</title>
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0C0E12">
+<style>
+  :root{
+    --bg: #0C0E12;
+    --surface: #15181D;
+    --surface-2: #1C2027;
+    --line: #262B33;
+    --text: #ECEAE4;
+    --muted: #8B93A1;
+    --accent: #D4A24C;
+    --accent-dim: #6B5730;
+    --danger: #C0604B;
+    --radius: 14px;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior-y: contain;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  header.top{
+    display:flex; align-items:center; justify-content:space-between;
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid var(--line);
+    position: sticky; top:0; background: rgba(12,14,18,0.92);
+    backdrop-filter: blur(10px);
+    z-index: 20;
+  }
+  .brand{
+    font-family: Georgia, "Iowan Old Style", serif;
+    font-size: 21px;
+    letter-spacing: 0.02em;
+    display:flex; align-items:center; gap:8px;
+  }
+  .brand .dot{width:7px; height:7px; border-radius:50%; background: var(--accent);}
+  .account-pill{
+    font-size: 12px; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 6px 12px;
+    display:flex; align-items:center; gap:6px;
+    background: var(--surface);
+  }
+  .account-pill .status-dot{width:6px;height:6px;border-radius:50%;background:#3FA66B;}
+  main{ padding: 18px 16px 40px; max-width: 720px; margin: 0 auto; }
+
+  /* ---------- Login screen ---------- */
+  #login-screen{
+    min-height: 82vh;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; gap: 22px; padding: 20px;
+  }
+  .reel-mark{
+    width: 74px; height: 74px; border-radius: 50%;
+    border: 3px solid var(--accent);
+    position: relative;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .reel-mark::before, .reel-mark::after{
+    content:""; position:absolute; width:12px; height:12px; border-radius:50%;
+    background: var(--accent); opacity:0.55;
+  }
+  .reel-mark::before{ top:10px; left:16px; }
+  .reel-mark::after{ bottom:10px; right:16px; }
+  .reel-mark span{ width:10px; height:10px; border-radius:50%; background:var(--accent); }
+  #login-screen h1{ font-family: Georgia, serif; font-size: 26px; font-weight: 500; }
+  #login-screen p{ color: var(--muted); font-size: 14.5px; max-width: 320px; line-height:1.7; }
+  .btn{
+    appearance:none; border:none; cursor:pointer;
+    font-size: 15px; font-weight: 600;
+    border-radius: 12px; padding: 14px 26px;
+    display:inline-flex; align-items:center; gap:10px;
+    transition: transform .12s ease, opacity .12s ease;
+  }
+  .btn:active{ transform: scale(0.97); }
+  .btn-primary{ background: var(--accent); color: #16130A; }
+  .btn-ghost{ background: var(--surface); color: var(--text); border:1px solid var(--line); }
+  .fine-print{ font-size: 11.5px; color: #5C6472; max-width: 300px; line-height:1.6; }
+
+  /* ---------- Folder grid ---------- */
+  .section-label{
+    font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); margin: 22px 4px 12px;
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .folder-grid{
+    display:grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  }
+  .folder-card{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px 14px;
+    cursor: pointer;
+    position: relative;
+    overflow:hidden;
+  }
+  .folder-card:active{ background: var(--surface-2); }
+  .folder-card .count{
+    font-size: 26px; font-family: Georgia, serif; color: var(--accent);
+  }
+  .folder-card .name{ font-size: 14px; margin-top: 6px; }
+  .folder-card .perf{
+    position:absolute; inset-inline-start:0; top:0; bottom:0; width:6px;
+    background-image: repeating-linear-gradient(to bottom, var(--line) 0 4px, transparent 4px 9px);
+  }
+
+  /* ---------- Video list ---------- */
+  .backbar{
+    display:flex; align-items:center; gap:10px; margin: 4px 0 16px;
+    color: var(--muted); font-size: 14px; cursor:pointer;
+  }
+  .video-row{
+    display:flex; gap:12px; align-items:center;
+    background: var(--surface); border:1px solid var(--line);
+    border-radius: 12px; padding: 10px; margin-bottom: 10px;
+    cursor:pointer;
+  }
+  .thumb{
+    width: 84px; height: 84px; border-radius: 8px; flex-shrink:0;
+    background: linear-gradient(135deg, #2A2E36, #171A1F);
+    display:flex; align-items:center; justify-content:center;
+    color: var(--accent); font-size:20px; position:relative;
+  }
+  .thumb .cache-badge{
+    position:absolute; bottom:4px; inset-inline-end:4px;
+    font-size: 9px; background: rgba(63,166,107,0.9); color:#fff;
+    padding: 2px 5px; border-radius: 5px; letter-spacing:0.02em;
+  }
+  .video-meta{ flex:1; min-width:0; }
+  .video-meta .author{ font-size: 13px; color: var(--muted); }
+  .video-meta .text{
+    font-size: 14px; margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; line-height:1.4;
+  }
+  .video-meta .meta-row{ font-size:11.5px; color:#5C6472; margin-top:6px; display:flex; gap:10px; }
+
+  /* ---------- Player ---------- */
+  #player-screen{ display:none; }
+  #player-screen.active{ display:block; }
+  .player-wrap{
+    background:#000; border-radius: var(--radius); overflow:hidden;
+    aspect-ratio: 9/16; max-height: 70vh; margin: 0 auto 14px;
+    position:relative; display:flex; align-items:center; justify-content:center;
+  }
+  video{ width:100%; height:100%; object-fit:contain; background:#000; }
+  .quality-bar{
+    display:flex; align-items:center; justify-content:space-between;
+    gap:10px; margin-bottom: 18px;
+  }
+  .quality-select{
+    display:flex; gap:6px; background: var(--surface); border:1px solid var(--line);
+    border-radius: 999px; padding: 4px;
+  }
+  .quality-select button{
+    appearance:none; border:none; background:transparent; color:var(--muted);
+    font-size:12.5px; padding:6px 12px; border-radius:999px; cursor:pointer;
+  }
+  .quality-select button.active{ background: var(--accent); color:#16130A; font-weight:600; }
+  .net-hint{ font-size:11.5px; color:#5C6472; display:flex; align-items:center; gap:6px; }
+  .net-hint .sig{width:6px;height:6px;border-radius:50%; background:#3FA66B;}
+  .player-caption{ font-size:14.5px; line-height:1.7; margin-bottom:10px; }
+  .player-actions{ display:flex; gap:10px; }
+
+  .hidden{ display:none !important; }
+  #app-screen{ display:none; }
+  #app-screen.active{ display:block; }
+
+  ::-webkit-scrollbar{ display:none; }
+</style>
+</head>
+<body>
+
+<!-- ============ LOGIN SCREEN ============ -->
+<div id="login-screen">
+  <div class="reel-mark"><span></span></div>
+  <h1>Reel</h1>
+  <p>آرشیو شخصی ویدیوهای بوکمارک‌شده‌ات از X، دسته‌بندی‌شده در فولدر، با کیفیت قابل انتخاب و کش داخلی.</p>
+  <button class="btn btn-primary" id="login-btn">ورود با حساب X</button>
+  <button class="btn btn-ghost" id="demo-btn">حالت دمو (بدون لاگین واقعی)</button>
+  <p class="fine-print">با ورود، این اپ فقط به بوکمارک‌های خودت (Owned Read) دسترسی می‌خواد. توکن فقط روی همین دستگاه ذخیره میشه.</p>
+</div>
+
+<!-- ============ APP SHELL ============ -->
+<div id="app-screen">
+  <header class="top">
+    <div class="brand"><span class="dot"></span> Reel</div>
+    <div class="account-pill" id="logout-btn"><span class="status-dot"></span> <span id="account-name">@you</span> · خروج</div>
+  </header>
+
+  <main>
+    <!-- Folder grid -->
+    <div id="folders-view">
+      <div class="section-label">فولدرها <span id="folder-total">۴ فولدر</span></div>
+      <div class="folder-grid" id="folder-grid"></div>
+    </div>
+
+    <!-- Video list inside a folder -->
+    <div id="videos-view" class="hidden">
+      <div class="backbar" id="back-to-folders">← بازگشت به فولدرها</div>
+      <div class="section-label" id="folder-title">—</div>
+      <div id="video-list"></div>
+    </div>
+
+    <!-- Player -->
+    <div id="player-screen">
+      <div class="backbar" id="back-to-videos">← بازگشت به لیست</div>
+      <div class="player-wrap">
+        <video id="video-el" playsinline controls></video>
+      </div>
+      <div class="quality-bar">
+        <div class="quality-select" id="quality-select"></div>
+        <div class="net-hint"><span class="sig"></span> <span id="net-label">Wi-Fi</span></div>
+      </div>
+      <div class="player-caption" id="player-caption"></div>
+      <div class="player-actions">
+        <button class="btn btn-ghost" id="cache-btn">ذخیره برای آفلاین</button>
+        <button class="btn btn-ghost" id="open-x-btn">مشاهده در X</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
