@@ -13,9 +13,18 @@ const CONFIG = {
   clientId: 'TkhiM2N1SXJ3RC1CZ2dhMnEtZ246MTpjaQ',              // from X Developer Portal (OAuth 2.0, "public client" type enables PKCE without a secret)
   redirectUri: window.location.origin + window.location.pathname, // must match the callback URL registered in the portal
   authEndpoint: 'https://x.com/i/oauth2/authorize',
-  tokenEndpoint: 'https://x-proxy.soheil-sptfy.workers.dev/2/oauth2/token', // NOTE: see "CORS caveat" comment near exchangeCodeForToken()
-  scopes: ['bookmark.read', 'users.read', 'offline.access'],
+  apiBase: 'https://x-proxy.soheil-sptfy.workers.dev', // Cloudflare Worker proxy (NO trailing slash)
+  tokenEndpoint: 'https://x-proxy.soheil-sptfy.workers.dev/2/oauth2/token',
+  // tweet.read is required by the bookmarks endpoint; without it you get 403
+  scopes: ['tweet.read', 'bookmark.read', 'users.read', 'offline.access'],
+  maxPages: 8, // X returns at most ~800 bookmarks (8 pages x 100)
 };
+
+// Tweet text comes from the network and is rendered via innerHTML below,
+// so it MUST be escaped.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 
 // ---------------------------------------------------------------------
 // 2. MOCK DATA — remove once real fetchBookmarks() is wired up.
@@ -81,14 +90,16 @@ async function sha256(str) {
 async function startLogin() {
   const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const challenge = base64url(await sha256(verifier));
+  const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
   sessionStorage.setItem('pkce_verifier', verifier);
+  sessionStorage.setItem('pkce_state', state);
 
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: CONFIG.clientId,
     redirect_uri: CONFIG.redirectUri,
     scope: CONFIG.scopes.join(' '),
-    state: base64url(crypto.getRandomValues(new Uint8Array(16))),
+    state,
     code_challenge: challenge,
     code_challenge_method: 'S256',
   });
@@ -114,8 +125,48 @@ async function exchangeCodeForToken(code) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
-  if (!res.ok) throw new Error('Token exchange failed: ' + res.status);
+  if (!res.ok) throw new Error('Token exchange failed: ' + res.status + ' ' + (await res.text()));
   return res.json(); // { access_token, refresh_token, expires_in, ... }
+}
+
+// X access tokens live ~2 hours. offline.access gives a refresh token;
+// X rotates it on every use, so we must save the new one each time.
+function saveTokens(t) {
+  localStorage.setItem('reel_access_token', t.access_token);
+  if (t.refresh_token) localStorage.setItem('reel_refresh_token', t.refresh_token);
+  if (t.expires_in) localStorage.setItem('reel_token_expires_at', String(Date.now() + t.expires_in * 1000));
+}
+
+async function refreshAccessToken() {
+  const rt = localStorage.getItem('reel_refresh_token');
+  if (!rt) throw new Error('no refresh token — log in again');
+  const res = await fetch(CONFIG.tokenEndpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: rt, client_id: CONFIG.clientId }),
+  });
+  if (!res.ok) throw new Error('Token refresh failed: ' + res.status);
+  const t = await res.json();
+  saveTokens(t);
+  return t.access_token;
+}
+
+async function getValidToken() {
+  const exp = Number(localStorage.getItem('reel_token_expires_at') || 0);
+  if (exp && Date.now() > exp - 60000) return refreshAccessToken();
+  return localStorage.getItem('reel_access_token');
+}
+
+// fetch wrapper for X API calls: attaches the token, retries once on 401.
+async function xFetch(url, retry = true) {
+  const token = await getValidToken();
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 401 && retry) {
+    await refreshAccessToken();
+    return xFetch(url, false);
+  }
+  if (res.status === 429) throw new Error('Rate limited (429) — try again in 15 minutes');
+  return res;
 }
 
 function isLoggedIn() {
@@ -130,52 +181,103 @@ function isLoggedIn() {
 // maps { folderName: [tweetId, ...] }, then still resolve media through
 // this same X API call.
 // ---------------------------------------------------------------------
-async function fetchBookmarksFromX(userId, accessToken, sinceId = null) {
-  const url = new URL(`https://x-proxy.soheil-sptfy.workers.dev//2/users/${userId}/bookmarks`);
+async function fetchBookmarksFromX(userId, paginationToken = null) {
+  const url = new URL(`${CONFIG.apiBase}/2/users/${userId}/bookmarks`);
   url.searchParams.set('expansions', 'attachments.media_keys,author_id');
   url.searchParams.set('media.fields', 'variants,type,duration_ms');
-  url.searchParams.set('tweet.fields', 'created_at');
-  url.searchParams.set('max_results', '100'); // max allowed per request
-  if (sinceId) url.searchParams.set('since_id', sinceId); // only items newer than the last synced one
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!res.ok) throw new Error('Bookmarks fetch failed: ' + res.status);
-  return res.json();
-  // Real response gives media.variants: [{bit_rate, content_type, url}, ...]
-  // per video — filter content_type === 'video/mp4' (or the m3u8 master
-  // playlist if X returns one) and sort by bit_rate to build the quality list.
+  url.searchParams.set('tweet.fields', 'created_at,attachments,author_id');
+  url.searchParams.set('user.fields', 'username');
+  url.searchParams.set('max_results', '100');
+  // NOTE: the bookmarks endpoint does NOT support since_id. Only
+  // max_results + pagination_token. Results are newest-first.
+  if (paginationToken) url.searchParams.set('pagination_token', paginationToken);
+  const res = await xFetch(url);
+  if (!res.ok) throw new Error('Bookmarks fetch failed: ' + res.status + ' ' + (await res.text()));
+  return res.json(); // { data, includes: {media, users}, meta: {next_token} }
 }
 
-// ---------------------------------------------------------------------
-// 4b. INCREMENTAL SYNC — call this on app open, not on a timer. It only
-// asks the API for bookmarks newer than the last sync, then merges them
-// into a local store. This is what keeps real-world usage far under the
-// free-tier rate limit (10 req / 15 min, 100 items per request) even
-// with a large bookmark backlog.
-// ---------------------------------------------------------------------
-async function syncBookmarks(userId, accessToken) {
-  const lastId = localStorage.getItem('reel_since_id'); // null on first-ever sync
-  const data = await fetchBookmarksFromX(userId, accessToken, lastId);
-  const newItems = data.data || [];
-
-  if (newItems.length) {
-    const store = JSON.parse(localStorage.getItem('reel_bookmark_store') || '[]');
-    localStorage.setItem('reel_bookmark_store', JSON.stringify([...newItems, ...store]));
-    localStorage.setItem('reel_since_id', newItems[0].id); // X returns newest-first
+// Turn raw tweets + includes into the same shape the UI already uses
+// for MOCK_VIDEOS. Tweets without video/GIF are skipped.
+function toVideoRecords(tweets, includes) {
+  const media = new Map((includes?.media || []).map(m => [m.media_key, m]));
+  const users = new Map((includes?.users || []).map(u => [u.id, u]));
+  const out = [];
+  for (const t of tweets) {
+    const m = (t.attachments?.media_keys || []).map(k => media.get(k))
+      .find(x => x && (x.type === 'video' || x.type === 'animated_gif'));
+    if (!m) continue;
+    const variants = (m.variants || [])
+      .filter(v => v.content_type === 'video/mp4') // skip m3u8 playlists
+      .sort((a, b) => (a.bit_rate || 0) - (b.bit_rate || 0)) // low → high
+      .map(v => {
+        const r = v.url.match(/\/(\d+)x(\d+)\//); // e.g. .../vid/avc1/720x1280/...
+        const label = r ? Math.min(+r[1], +r[2]) + 'p' : (m.type === 'animated_gif' ? 'GIF' : 'MP4');
+        return { label, bitrate: v.bit_rate || 0, url: v.url };
+      });
+    if (!variants.length) continue;
+    const username = users.get(t.author_id)?.username;
+    out.push({
+      id: t.id,
+      author: username ? '@' + username : '@unknown',
+      text: t.text || '',
+      tweetUrl: `https://x.com/${username || 'i'}/status/${t.id}`,
+      variants,
+    });
   }
-  return newItems.length; // how many new bookmarks came in, useful for a toast/badge
+  return out;
 }
 
+// ---------------------------------------------------------------------
+// 4b. INCREMENTAL SYNC — page through bookmarks (newest first) and stop
+// at the first tweet we've already seen. We remember ALL seen tweet IDs
+// (not just videos), so non-video bookmarks don't force re-paging.
+// ---------------------------------------------------------------------
+async function syncBookmarks(userId) {
+  const seen = new Set(JSON.parse(localStorage.getItem('reel_seen_ids') || '[]'));
+  const store = JSON.parse(localStorage.getItem('reel_video_store') || '[]');
+  const fresh = [];
+  const newSeen = [];
+  let token = null;
+  let reachedKnown = false;
+
+  for (let p = 0; p < CONFIG.maxPages && !reachedKnown; p++) {
+    const page = await fetchBookmarksFromX(userId, token);
+    const tweets = [];
+    for (const t of page.data || []) {
+      if (seen.has(t.id)) { reachedKnown = true; break; }
+      tweets.push(t);
+      newSeen.push(t.id);
+    }
+    fresh.push(...toVideoRecords(tweets, page.includes));
+    token = page.meta?.next_token;
+    if (!token) break;
+  }
+
+  if (newSeen.length) {
+    localStorage.setItem('reel_seen_ids', JSON.stringify([...newSeen, ...seen]));
+    localStorage.setItem('reel_video_store', JSON.stringify([...fresh, ...store]));
+  }
+  return fresh.length; // number of new VIDEOS
+}
+
+// --- data source: demo → mock, real login → synced store -------------
+function isDemo() { return localStorage.getItem('reel_access_token') === 'demo'; }
+
+function getAllVideos() {
+  if (isDemo()) return MOCK_VIDEOS;
+  const list = JSON.parse(localStorage.getItem('reel_video_store') || '[]');
+  return Object.fromEntries(list.map(v => [v.id, v]));
+}
+function getVideo(id) { return getAllVideos()[id]; }
 
 function loadFolderMap() {
-  // MOCK: local mapping. Replace with localStorage-backed editor,
-  // or a fetch() to a GitHub raw JSON file for the external-bookmarking case.
-  return MOCK_FOLDERS;
+  if (isDemo()) return MOCK_FOLDERS;
+  // TODO: user-defined folders. For now one automatic folder with everything.
+  return [{ id: 'all', name: 'همه ویدیوها', videos: Object.keys(getAllVideos()) }];
 }
 
-async function fetchMyUserId(accessToken) {
-  const res = await fetch('https://x-proxy.soheil-sptfy.workers.dev/2/users/me', {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+async function fetchMyUserId() {
+  const res = await xFetch(`${CONFIG.apiBase}/2/users/me`);
   if (!res.ok) throw new Error('users/me failed: ' + res.status);
   const data = await res.json();
   localStorage.setItem('reel_user_id', data.data.id);
@@ -199,7 +301,7 @@ function renderFolders() {
     <div class="folder-card" data-id="${f.id}">
       <div class="perf"></div>
       <div class="count">${f.videos.length}</div>
-      <div class="name">${f.name}</div>
+      <div class="name">${esc(f.name)}</div>
     </div>
   `).join('');
   grid.querySelectorAll('.folder-card').forEach(card => {
@@ -217,14 +319,14 @@ async function openFolder(folderId) {
 
   const list = el('video-list');
   const rows = await Promise.all(currentFolder.videos.map(async (vid) => {
-    const v = MOCK_VIDEOS[vid];
+    const v = getVideo(vid);
     const cached = await isVideoCached(v);
     return `
       <div class="video-row" data-id="${v.id}">
         <div class="thumb">▶${cached ? '<span class="cache-badge">کش‌شده</span>' : ''}</div>
         <div class="video-meta">
-          <div class="author">${v.author}</div>
-          <div class="text">${v.text}</div>
+          <div class="author">${esc(v.author)}</div>
+          <div class="text">${esc(v.text)}</div>
           <div class="meta-row"><span>${v.variants.length} کیفیت موجود</span></div>
         </div>
       </div>`;
@@ -236,12 +338,12 @@ async function openFolder(folderId) {
 }
 
 async function openPlayer(videoId) {
-  currentVideo = MOCK_VIDEOS[videoId];
+  currentVideo = getVideo(videoId);
   currentVariantIndex = currentVideo.variants.length - 1; // default: highest quality
   el('videos-view').classList.add('hidden');
   el('player-screen').classList.add('active');
   el('player-caption').textContent = `${currentVideo.author} — ${currentVideo.text}`;
-  el('open-x-btn').onclick = () => window.open(currentVideo.tweetUrl, '_blank');
+  el('open-x-btn').onclick = () => window.open(currentVideo.tweetUrl, '_blank', 'noopener');
   renderQualitySelect();
   await loadVariant(currentVariantIndex);
   updateNetHint();
@@ -339,7 +441,8 @@ el('demo-btn').addEventListener('click', () => {
   renderFolders();
 });
 el('logout-btn').addEventListener('click', () => {
-  localStorage.removeItem('reel_access_token');
+  ['reel_access_token', 'reel_refresh_token', 'reel_token_expires_at', 'reel_user_id']
+    .forEach(k => localStorage.removeItem(k));
   el('video-el')?.pause();
   el('player-screen').classList.remove('active');
   el('videos-view').classList.add('hidden');
@@ -356,12 +459,14 @@ async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
   if (params.has('code')) {
     try {
+      if (params.get('state') !== sessionStorage.getItem('pkce_state')) throw new Error('state mismatch');
       const token = await exchangeCodeForToken(params.get('code'));
-      localStorage.setItem('reel_access_token', token.access_token);
-      window.history.replaceState({}, '', CONFIG.redirectUri); // strip ?code from URL
+      saveTokens(token);
     } catch (e) {
       console.error(e);
       alert('ورود ناموفق بود — کنسول رو برای جزئیات ببین');
+    } finally {
+      window.history.replaceState({}, '', CONFIG.redirectUri); // strip ?code from URL
     }
   }
 
@@ -371,14 +476,14 @@ async function bootstrap() {
     renderFolders();
 
     // Real login (not demo mode) → sync on open, not on a timer.
-    const token = localStorage.getItem('reel_access_token');
-    if (token && token !== 'demo') {
+    if (!isDemo()) {
       try {
-        const userId = localStorage.getItem('reel_user_id') || (await fetchMyUserId(token));
-        const newCount = await syncBookmarks(userId, token);
-        if (newCount) console.log(`${newCount} new bookmark(s) synced`);
+        const userId = localStorage.getItem('reel_user_id') || (await fetchMyUserId());
+        const newCount = await syncBookmarks(userId);
+        if (newCount) console.log(`${newCount} new video bookmark(s) synced`);
+        renderFolders(); // re-render with synced data
       } catch (e) {
-        console.error('Sync failed:', e); // e.g. rate-limited — safe to ignore, cached data still shows
+        console.error('Sync failed:', e); // cached data still shows
       }
     }
   }
