@@ -13,7 +13,7 @@ const CONFIG = {
   clientId: 'TkhiM2N1SXJ3RC1CZ2dhMnEtZ246MTpjaQ',              // from X Developer Portal (OAuth 2.0, "public client" type enables PKCE without a secret)
   redirectUri: window.location.origin + window.location.pathname, // must match the callback URL registered in the portal
   authEndpoint: 'https://x.com/i/oauth2/authorize',
-  tokenEndpoint: 'https://api.x.com/2/oauth2/token', // NOTE: see "CORS caveat" comment near exchangeCodeForToken()
+  tokenEndpoint: 'https://x-proxy.soheil-sptfy.workers.dev/2/oauth2/token', // NOTE: see "CORS caveat" comment near exchangeCodeForToken()
   scopes: ['bookmark.read', 'users.read', 'offline.access'],
 };
 
@@ -131,7 +131,7 @@ function isLoggedIn() {
 // this same X API call.
 // ---------------------------------------------------------------------
 async function fetchBookmarksFromX(userId, accessToken, sinceId = null) {
-  const url = new URL(`https://api.x.com/2/users/${userId}/bookmarks`);
+  const url = new URL(`https://x-proxy.soheil-sptfy.workers.dev//2/users/${userId}/bookmarks`);
   url.searchParams.set('expansions', 'attachments.media_keys,author_id');
   url.searchParams.set('media.fields', 'variants,type,duration_ms');
   url.searchParams.set('tweet.fields', 'created_at');
@@ -173,7 +173,7 @@ function loadFolderMap() {
 }
 
 async function fetchMyUserId(accessToken) {
-  const res = await fetch('https://api.x.com/2/users/me', {
+  const res = await fetch('https://x-proxy.soheil-sptfy.workers.dev/2/users/me', {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) throw new Error('users/me failed: ' + res.status);
