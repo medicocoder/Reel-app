@@ -10,7 +10,7 @@ const CACHE_NAME = 'reel-video-cache-v1';
 // 1. CONFIG — fill these in once you register an app at developer.x.com
 // ---------------------------------------------------------------------
 const CONFIG = {
-  clientId: 'YOUR_X_CLIENT_ID',              // from X Developer Portal (OAuth 2.0, "public client" type enables PKCE without a secret)
+  clientId: 'TkhiM2N1SXJ3RC1CZ2dhMnEtZ246MTpjaQ',              // from X Developer Portal (OAuth 2.0, "public client" type enables PKCE without a secret)
   redirectUri: window.location.origin + window.location.pathname, // must match the callback URL registered in the portal
   authEndpoint: 'https://x.com/i/oauth2/authorize',
   tokenEndpoint: 'https://api.x.com/2/oauth2/token', // NOTE: see "CORS caveat" comment near exchangeCodeForToken()
