@@ -23,6 +23,9 @@ const CONFIG = {
   // Expanding author usernames returns extra User objects, which X may bill
   // separately (~$0.01 each). Off by default to keep sync cheap.
   includeAuthors: false,
+  // Free mode: video info comes from the public FxTwitter API through the
+  // same Cloudflare Worker (add a /fx/ route there, see Worker code).
+  fxPath: '/fx/2/status/',
   maxPages: 8, // X returns at most ~800 bookmarks (8 pages x 100)
 };
 
@@ -284,6 +287,7 @@ async function syncBookmarks(userId) {
 
 // --- data source: demo → mock, real login → synced store -------------
 function isDemo() { return localStorage.getItem('reel_access_token') === 'demo'; }
+function isLocal() { return localStorage.getItem('reel_access_token') === 'local'; } // free mode: no X API, add videos by link
 
 function getVideoList() { // newest first
   try { return JSON.parse(localStorage.getItem('reel_video_store') || '[]'); } catch { return []; }
@@ -308,11 +312,24 @@ function loadFolderMap() {
   return [{ id: 'all', name: 'همه ویدیوها', videos: list.map(v => v.id), builtin: true }, ...custom];
 }
 
+function newFolderId() { return 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+// Used by ?add=...&folder=Name (iOS Shortcut can pass the folder directly).
+function addToFolderByName(ids, name) {
+  const folders = loadCustomFolders();
+  let f = folders.find(x => x.name === name);
+  if (!f) { f = { id: newFolderId(), name, videos: [] }; folders.push(f); }
+  for (const id of ids) if (!f.videos.includes(id)) f.videos.unshift(id);
+  saveCustomFolders(folders);
+  renderFolders();
+  return f;
+}
+
 function createFolder() {
   const name = (prompt('اسم فولدر جدید:') || '').trim();
   if (!name) return null;
   const list = loadCustomFolders();
-  const f = { id: 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, videos: [] };
+  const f = { id: newFolderId(), name, videos: [] };
   list.push(f);
   saveCustomFolders(list);
   renderFolders();
@@ -336,7 +353,8 @@ function deleteFolder(id) {
   renderFolders();
   el('back-to-folders').click();
 }
-function addToFolderFlow(videoId) {
+function addToFolderFlow(videoIds) {
+  const ids = [].concat(videoIds);
   let folders = loadCustomFolders();
   const lines = folders.map((f, i) => `${i + 1}) ${f.name}`).join('\n');
   const ans = prompt(`افزودن به کدوم فولدر؟ شماره رو بنویس:\n${lines}\n0) ساخت فولدر جدید`, folders.length ? '1' : '0');
@@ -352,10 +370,10 @@ function addToFolderFlow(videoId) {
     target = folders[n - 1];
   }
   if (!target) return;
-  if (!target.videos.includes(videoId)) target.videos.unshift(videoId);
+  for (const id of ids) if (!target.videos.includes(id)) target.videos.unshift(id);
   saveCustomFolders(folders);
   renderFolders();
-  alert(`به «${target.name}» اضافه شد`);
+  alert(`${ids.length} ویدیو به «${target.name}» اضافه شد`);
 }
 function removeFromFolder(folderId, videoId) {
   const folders = loadCustomFolders();
@@ -388,13 +406,13 @@ function explainError(e) {
 }
 
 function showUsername() {
-  const name = localStorage.getItem('reel_username');
+  const label = isLocal() ? 'حالت رایگان' : (localStorage.getItem('reel_username') ? '@' + localStorage.getItem('reel_username') : null);
   const root = el('app-screen');
-  if (!name || !root) return;
+  if (!label || !root) return;
   const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let n;
   while ((n = w.nextNode())) {
-    if (/\byou@\w*/.test(n.nodeValue)) n.nodeValue = n.nodeValue.replace(/\byou@\w*/, '@' + name);
+    if (/\byou@\w*/.test(n.nodeValue)) n.nodeValue = n.nodeValue.replace(/\byou@\w*/, label);
   }
 }
 
@@ -412,6 +430,84 @@ async function ensureUser() {
   return id;
 }
 
+// --- FREE MODE: add videos by pasting tweet links -----------------------
+// No X API, no login, no credits. Video info is fetched from the public
+// FxTwitter API (third-party, unofficial) via our Cloudflare Worker.
+function extractStatusIds(text) {
+  const ids = new Set();
+  let m;
+  const re = /status(?:es)?\/(\d{5,20})/g; // x.com/u/status/ID, i/status/ID, i/web/status/ID
+  while ((m = re.exec(text))) ids.add(m[1]);
+  for (const tok of String(text).split(/\s+/)) if (/^\d{15,20}$/.test(tok)) ids.add(tok); // bare IDs
+  return [...ids];
+}
+
+function fxToRecord(st) {
+  const v = (st.media?.videos || [])[0]; // videos + GIFs
+  if (!v) return null;
+  let fmts = (v.formats || []).filter(f => f.container === 'mp4' && f.url);
+  // Prefer h264 (plays everywhere); HEVC-only mp4 can fail on some desktops.
+  if (fmts.some(f => f.codec === 'h264')) fmts = fmts.filter(f => f.codec === 'h264');
+  const labelOf = (o) => (o.width && o.height) ? Math.min(o.width, o.height) + 'p' : (v.type === 'gif' ? 'GIF' : 'MP4');
+  let variants = fmts.sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0))
+    .map(f => ({ label: labelOf(f), bitrate: f.bitrate || 0, url: f.url }));
+  if (!variants.length && v.url) variants = [{ label: labelOf(v), bitrate: 0, url: v.url }];
+  if (!variants.length) return null;
+  const user = st.author?.screen_name;
+  return {
+    id: st.id,
+    author: user ? '@' + user : 'ویدیوی X',
+    text: st.text || '',
+    tweetUrl: st.url || `https://x.com/${user || 'i'}/status/${st.id}`,
+    variants,
+  };
+}
+
+async function importLinks(text) {
+  const ids = extractStatusIds(text);
+  if (!ids.length) return { msg: 'لینک توییت پیدا نشد. لینک باید شبیه x.com/…/status/123… باشه.', ids: [] };
+  const store = getVideoList();
+  const known = new Set(store.map(v => v.id));
+  const todo = ids.filter(id => !known.has(id));
+  const added = [];
+  let noVideo = 0;
+  const errors = [];
+  for (let i = 0; i < todo.length; i += 4) { // 4 at a time
+    await Promise.all(todo.slice(i, i + 4).map(async (id) => {
+      try {
+        const res = await fetch(`${CONFIG.apiBase}${CONFIG.fxPath}${id}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const j = await res.json();
+        const rec = fxToRecord(j.status || {});
+        if (rec) added.push(rec); else noVideo++;
+      } catch (e) {
+        errors.push(`${id}: ${e.message}`);
+      }
+    }));
+  }
+  if (added.length) {
+    localStorage.setItem('reel_video_store', JSON.stringify([...added, ...store]));
+    const seen = JSON.parse(localStorage.getItem('reel_seen_ids') || '[]');
+    localStorage.setItem('reel_seen_ids', JSON.stringify([...added.map(v => v.id), ...seen]));
+  }
+  renderFolders();
+  let msg = `${added.length} ویدیو اضافه شد`;
+  if (ids.length - todo.length) msg += `، ${ids.length - todo.length} تکراری`;
+  if (noVideo) msg += `، ${noVideo} توییت بدون ویدیو`;
+  if (errors.length) msg += `\nخطا (${errors.length}): ${errors[0]}${/HTTP 403|Forbidden/.test(errors[0]) ? ' — Worker رو با کد جدید Deploy کردی؟' : ''}`;
+  const have = new Set(getVideoList().map(v => v.id));
+  return { msg, ids: ids.filter(id => have.has(id)) }; // videos now in the library
+}
+
+async function addLinksFlow() {
+  const text = prompt('لینک توییت(ها) رو Paste کن (چندتا هم می‌تونی، با فاصله یا خط جدید):');
+  if (!text) return;
+  setStatus('در حال دریافت اطلاعات ویدیو…');
+  const r = await importLinks(text);
+  setStatus(r.msg);
+  if (r.ids.length) addToFolderFlow(r.ids); // optional: pick a folder (Cancel = skip)
+}
+
 let syncing = false;
 function setStatus(msg, isError = false) {
   const st = el('sync-status');
@@ -421,7 +517,7 @@ function setStatus(msg, isError = false) {
 }
 
 async function runSync() {
-  if (isDemo() || syncing) return;
+  if (isDemo() || isLocal() || syncing) return;
   syncing = true;
   const btn = el('sync-btn');
   if (btn) btn.disabled = true;
@@ -454,15 +550,18 @@ function ensureToolbar() {
     bar.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px';
     bar.innerHTML = `
       <button id="new-folder-btn" style="${BTN_STYLE}">+ فولدر جدید</button>
+      <button id="add-link-btn" style="${BTN_STYLE}">🔗 افزودن با لینک</button>
       <button id="sync-btn" style="${BTN_STYLE}">↻ همگام‌سازی</button>
       <div id="sync-status" style="flex-basis:100%;font-size:12px;opacity:.85;white-space:pre-wrap"></div>`;
     el('folder-grid').insertAdjacentElement('beforebegin', bar);
     el('new-folder-btn').addEventListener('click', createFolder);
     el('sync-btn').addEventListener('click', runSync);
+    el('add-link-btn').addEventListener('click', addLinksFlow);
   }
   const hide = isDemo();
   el('new-folder-btn').style.display = hide ? 'none' : '';
-  el('sync-btn').style.display = hide ? 'none' : '';
+  el('sync-btn').style.display = (hide || isLocal()) ? 'none' : ''; // API sync only in API mode
+  el('add-link-btn').style.display = hide ? 'none' : '';
 }
 
 function renderFolderActions() {
@@ -652,6 +751,23 @@ el('demo-btn').addEventListener('click', () => {
   el('app-screen').classList.add('active');
   renderFolders();
 });
+// Free-mode entry button, injected next to the demo button (no index.html change).
+(function addFreeModeButton() {
+  const demo = el('demo-btn');
+  if (!demo) return;
+  const b = document.createElement('button');
+  b.id = 'free-btn';
+  b.className = demo.className;
+  b.textContent = 'ورود رایگان (بدون X) — افزودن با لینک';
+  b.addEventListener('click', () => {
+    localStorage.setItem('reel_access_token', 'local');
+    el('login-screen').classList.add('hidden');
+    el('app-screen').classList.add('active');
+    renderFolders();
+    showUsername();
+  });
+  demo.insertAdjacentElement('beforebegin', b);
+})();
 el('logout-btn').addEventListener('click', () => {
   ['reel_access_token', 'reel_refresh_token', 'reel_token_expires_at', 'reel_user_id', 'reel_username']
     .forEach(k => localStorage.removeItem(k));
@@ -692,13 +808,30 @@ async function bootstrap() {
     }
   }
 
+  // ?add=<tweet url> (from an iOS Shortcut / share sheet) → free mode import
+  const addParam = params.get('add');
+  if (addParam && !isLoggedIn()) localStorage.setItem('reel_access_token', 'local');
+
   if (isLoggedIn()) {
     el('login-screen').classList.add('hidden');
     el('app-screen').classList.add('active');
     renderFolders();
 
-    // Real login (not demo mode) → sync once on open (manual button too).
-    if (!isDemo()) { showUsername(); runSync(); }
+    if (isLocal()) showUsername();
+    // API mode → sync once on open (manual button too). Free/demo modes don't call X.
+    if (!isDemo() && !isLocal()) { showUsername(); runSync(); }
+
+    if (addParam && !isDemo()) {
+      window.history.replaceState({}, '', CONFIG.redirectUri);
+      setStatus('در حال دریافت اطلاعات ویدیو…');
+      const r = await importLinks(addParam);
+      setStatus(r.msg);
+      if (r.ids.length) {
+        const folderName = (params.get('folder') || '').trim();
+        if (folderName) addToFolderByName(r.ids, folderName); // straight into the named folder
+        else addToFolderFlow(r.ids);                          // otherwise ask which folder
+      }
+    }
   }
 
   if ('serviceWorker' in navigator) {
