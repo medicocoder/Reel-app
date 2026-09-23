@@ -1,854 +1,241 @@
-// =====================================================================
-// Reel — personal X bookmark video viewer (PWA skeleton / vibe-coding base)
-// This file is split into clearly marked sections so you can replace
-// the MOCK sections with real calls once you have API credentials.
-// =====================================================================
-
-const CACHE_NAME = 'reel-video-cache-v1';
-
-// ---------------------------------------------------------------------
-// 1. CONFIG — fill these in once you register an app at developer.x.com
-// ---------------------------------------------------------------------
-const CONFIG = {
-  clientId: 'TkhiM2N1SXJ3RC1CZ2dhMnEtZ246MTpjaQ',              // from X Developer Portal (OAuth 2.0, "public client" type enables PKCE without a secret)
-  // Must match the Callback URI in the X portal BYTE FOR BYTE, e.g.
-  // https://USERNAME.github.io/reel-app/  (with trailing slash, no index.html).
-  // Computed so that opening .../reel-app/index.html still yields the canonical URL.
-  redirectUri: window.location.origin + window.location.pathname.replace(/index\.html$/, '').replace(/([^/])$/, '$1/'),
-  authEndpoint: 'https://x.com/i/oauth2/authorize',
-  apiBase: 'https://x-proxy.soheil-sptfy.workers.dev', // Cloudflare Worker proxy (NO trailing slash)
-  tokenEndpoint: 'https://x-proxy.soheil-sptfy.workers.dev/2/oauth2/token',
-  // tweet.read is required by the bookmarks endpoint; without it you get 403
-  scopes: ['tweet.read', 'bookmark.read', 'users.read', 'offline.access'],
-  // Expanding author usernames returns extra User objects, which X may bill
-  // separately (~$0.01 each). Off by default to keep sync cheap.
-  // Official X API login needs paid credits. While you have none, keep this
-  // false: the API login button is hidden and old API sessions switch to free mode.
-  enableApiLogin: false,
-  includeAuthors: false,
-  // Free mode: video info comes from the public FxTwitter API through the
-  // same Cloudflare Worker (add a /fx/ route there, see Worker code).
-  fxPath: '/fx/2/status/',
-  maxPages: 8, // X returns at most ~800 bookmarks (8 pages x 100)
-};
-
-// Tweet text comes from the network and is rendered via innerHTML below,
-// so it MUST be escaped.
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-// ---------------------------------------------------------------------
-// 2. MOCK DATA — remove once real fetchBookmarks() is wired up.
-// Structure mirrors what you'd build from the real X API response:
-// each video has multiple bitrate variants (like X's media.variants).
-// Sample clips below are public domain test assets (Big Buck Bunny),
-// used only to demo the quality switcher — swap for real variant URLs.
-// ---------------------------------------------------------------------
-const MOCK_FOLDERS = [
-  { id: 'f1', name: 'آموزشی', videos: ['v1', 'v2'] },
-  { id: 'f2', name: 'طنز', videos: ['v3'] },
-  { id: 'f3', name: 'مستند', videos: ['v4'] },
-  { id: 'f4', name: 'برای بعد', videos: ['v2', 'v3'] },
-];
-
-const MOCK_VIDEOS = {
-  v1: {
-    id: 'v1', author: '@design_notes', text: 'یک ترد کوتاه درباره‌ی سیستم‌های تایپوگرافی و این‌که چطور مقیاس تایپ رو بچینیم.',
-    tweetUrl: 'https://x.com/i/status/1',
-    variants: [
-      { label: '360p', bitrate: 360, url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4' },
-      { label: '720p', bitrate: 720, url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4' },
-    ],
-  },
-  v2: {
-    id: 'v2', author: '@field_notes', text: 'کلیپ کوتاه از فرآیند رندر یک صحنه انیمیشن، فریم به فریم.',
-    tweetUrl: 'https://x.com/i/status/2',
-    variants: [
-      { label: '360p', bitrate: 360, url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4' },
-      { label: '480p', bitrate: 480, url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4' },
-    ],
-  },
-  v3: {
-    id: 'v3', author: '@daily_clip', text: 'یه کلیپ خنده‌دار که یه دوست فرستاده بود، صرفاً برای بایگانی.',
-    tweetUrl: 'https://x.com/i/status/3',
-    variants: [
-      { label: '360p', bitrate: 360, url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4' },
-    ],
-  },
-  v4: {
-    id: 'v4', author: '@archive_reel', text: 'بخشی از یک مستند کوتاه درباره‌ی معماری اواسط قرن بیستم.',
-    tweetUrl: 'https://x.com/i/status/4',
-    variants: [
-      { label: '480p', bitrate: 480, url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4' },
-      { label: '1080p', bitrate: 1080, url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4' },
-    ],
-  },
-};
-
-// ---------------------------------------------------------------------
-// 3. AUTH — OAuth 2.0 + PKCE against X. This part runs fully client-side.
-// ---------------------------------------------------------------------
-function base64url(buf) {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function sha256(str) {
-  const data = new TextEncoder().encode(str);
-  return crypto.subtle.digest('SHA-256', data);
-}
-
-async function startLogin() {
-  try {
-    await startLoginInner();
-  } catch (e) {
-    console.error(e);
-    alert('خطا در شروع ورود: ' + e.message);
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reel — بایگانی ویدیوهای بوکمارک‌شده</title>
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0C0E12">
+<style>
+  :root{
+    --bg: #0C0E12;
+    --surface: #15181D;
+    --surface-2: #1C2027;
+    --line: #262B33;
+    --text: #ECEAE4;
+    --muted: #8B93A1;
+    --accent: #D4A24C;
+    --accent-dim: #6B5730;
+    --danger: #C0604B;
+    --radius: 14px;
   }
-}
-
-async function startLoginInner() {
-  if (location.protocol !== 'https:') {
-    throw new Error('ورود X فقط روی آدرس https (همون GitHub Pages) کار می‌کنه، نه با باز کردن فایل روی کامپیوتر. آدرس فعلی: ' + location.href);
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior-y: contain;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
   }
-  if (!crypto.subtle) throw new Error('crypto.subtle در این مرورگر/حالت در دسترس نیست');
-  if (new URLSearchParams(location.search).has('debug')) {
-    alert('redirect_uri که ارسال میشه:\n' + CONFIG.redirectUri + '\n\nباید دقیقاً همین در X Developer Portal ثبت شده باشه.');
+  header.top{
+    display:flex; align-items:center; justify-content:space-between;
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid var(--line);
+    position: sticky; top:0; background: rgba(12,14,18,0.92);
+    backdrop-filter: blur(10px);
+    z-index: 20;
   }
-  const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
-  const challenge = base64url(await sha256(verifier));
-  const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
-  localStorage.setItem('pkce_verifier', verifier);
-  localStorage.setItem('pkce_state', state);
-
-  const params = new URLSearchParams({
-    response_type: 'code',
-    client_id: CONFIG.clientId,
-    redirect_uri: CONFIG.redirectUri,
-    scope: CONFIG.scopes.join(' '),
-    state,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-  });
-  window.location.href = `${CONFIG.authEndpoint}?${params.toString()}`;
-}
-
-// CORS caveat: some OAuth providers block browser-side fetch to their
-// token endpoint. If exchangeCodeForToken() fails with a CORS error in
-// the console, you'll need a tiny serverless proxy (a single Cloudflare
-// Worker / Vercel function) that just forwards this POST — it does NOT
-// need to hold a client secret since PKCE public clients don't use one.
-async function exchangeCodeForToken(code) {
-  const verifier = localStorage.getItem('pkce_verifier');
-  const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    client_id: CONFIG.clientId,
-    redirect_uri: CONFIG.redirectUri,
-    code,
-    code_verifier: verifier,
-  });
-  const res = await fetch(CONFIG.tokenEndpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-  if (!res.ok) throw new Error('Token exchange failed: ' + res.status + ' ' + (await res.text()));
-  return res.json(); // { access_token, refresh_token, expires_in, ... }
-}
-
-// X access tokens live ~2 hours. offline.access gives a refresh token;
-// X rotates it on every use, so we must save the new one each time.
-function saveTokens(t) {
-  localStorage.setItem('reel_access_token', t.access_token);
-  if (t.refresh_token) localStorage.setItem('reel_refresh_token', t.refresh_token);
-  if (t.expires_in) localStorage.setItem('reel_token_expires_at', String(Date.now() + t.expires_in * 1000));
-}
-
-async function refreshAccessToken() {
-  const rt = localStorage.getItem('reel_refresh_token');
-  if (!rt) throw new Error('no refresh token — log in again');
-  const res = await fetch(CONFIG.tokenEndpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: rt, client_id: CONFIG.clientId }),
-  });
-  if (!res.ok) throw new Error('Token refresh failed: ' + res.status);
-  const t = await res.json();
-  saveTokens(t);
-  return t.access_token;
-}
-
-async function getValidToken() {
-  const exp = Number(localStorage.getItem('reel_token_expires_at') || 0);
-  if (exp && Date.now() > exp - 60000) return refreshAccessToken();
-  return localStorage.getItem('reel_access_token');
-}
-
-// fetch wrapper for X API calls: attaches the token, retries once on 401.
-async function xFetch(url, retry = true) {
-  const token = await getValidToken();
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (res.status === 401 && retry) {
-    await refreshAccessToken();
-    return xFetch(url, false);
+  .brand{
+    font-family: Georgia, "Iowan Old Style", serif;
+    font-size: 21px;
+    letter-spacing: 0.02em;
+    display:flex; align-items:center; gap:8px;
   }
-  if (res.status === 429) { const e = new Error('Rate limited (429)'); e.status = 429; throw e; }
-  return res;
-}
-
-function isLoggedIn() {
-  return !!localStorage.getItem('reel_access_token');
-}
-
-// ---------------------------------------------------------------------
-// 4. BOOKMARKS — real call shape for when you're off mock data.
-// Folder assignment for the "bookmarked with this app" scenario is kept
-// locally (folderMap below). For the "bookmarked elsewhere" scenario,
-// swap loadFolderMap() to fetch a JSON file from a GitHub raw URL that
-// maps { folderName: [tweetId, ...] }, then still resolve media through
-// this same X API call.
-// ---------------------------------------------------------------------
-async function fetchBookmarksFromX(userId, paginationToken = null) {
-  const url = new URL(`${CONFIG.apiBase}/2/users/${userId}/bookmarks`);
-  url.searchParams.set('expansions', CONFIG.includeAuthors ? 'attachments.media_keys,author_id' : 'attachments.media_keys');
-  url.searchParams.set('media.fields', 'variants,type,duration_ms');
-  url.searchParams.set('tweet.fields', CONFIG.includeAuthors ? 'attachments,author_id' : 'attachments');
-  if (CONFIG.includeAuthors) url.searchParams.set('user.fields', 'username');
-  url.searchParams.set('max_results', '100');
-  // NOTE: the bookmarks endpoint does NOT support since_id. Only
-  // max_results + pagination_token. Results are newest-first.
-  if (paginationToken) url.searchParams.set('pagination_token', paginationToken);
-  const res = await xFetch(url);
-  if (!res.ok) throw await httpError('Bookmarks fetch', res);
-  return res.json(); // { data, includes: {media, users}, meta: {next_token} }
-}
-
-// Turn raw tweets + includes into the same shape the UI already uses
-// for MOCK_VIDEOS. Tweets without video/GIF are skipped.
-function toVideoRecords(tweets, includes) {
-  const media = new Map((includes?.media || []).map(m => [m.media_key, m]));
-  const users = new Map((includes?.users || []).map(u => [u.id, u]));
-  const out = [];
-  for (const t of tweets) {
-    const m = (t.attachments?.media_keys || []).map(k => media.get(k))
-      .find(x => x && (x.type === 'video' || x.type === 'animated_gif'));
-    if (!m) continue;
-    const variants = (m.variants || [])
-      .filter(v => v.content_type === 'video/mp4') // skip m3u8 playlists
-      .sort((a, b) => (a.bit_rate || 0) - (b.bit_rate || 0)) // low → high
-      .map(v => {
-        const r = v.url.match(/\/(\d+)x(\d+)\//); // e.g. .../vid/avc1/720x1280/...
-        const label = r ? Math.min(+r[1], +r[2]) + 'p' : (m.type === 'animated_gif' ? 'GIF' : 'MP4');
-        return { label, bitrate: v.bit_rate || 0, url: v.url };
-      });
-    if (!variants.length) continue;
-    const username = users.get(t.author_id)?.username;
-    out.push({
-      id: t.id,
-      author: username ? '@' + username : 'ویدیوی X',
-      text: t.text || '',
-      tweetUrl: `https://x.com/${username || 'i'}/status/${t.id}`,
-      variants,
-    });
+  .brand .dot{width:7px; height:7px; border-radius:50%; background: var(--accent);}
+  .account-pill{
+    font-size: 12px; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 6px 12px;
+    display:flex; align-items:center; gap:6px;
+    background: var(--surface);
   }
-  return out;
-}
+  .account-pill .status-dot{width:6px;height:6px;border-radius:50%;background:#3FA66B;}
+  main{ padding: 18px 16px 40px; max-width: 720px; margin: 0 auto; }
 
-// ---------------------------------------------------------------------
-// 4b. INCREMENTAL SYNC — page through bookmarks (newest first) and stop
-// at the first tweet we've already seen. We remember ALL seen tweet IDs
-// (not just videos), so non-video bookmarks don't force re-paging.
-// ---------------------------------------------------------------------
-async function syncBookmarks(userId) {
-  const seen = new Set(JSON.parse(localStorage.getItem('reel_seen_ids') || '[]'));
-  const store = JSON.parse(localStorage.getItem('reel_video_store') || '[]');
-  const fresh = [];
-  const newSeen = [];
-  let token = null;
-  let reachedKnown = false;
+  /* ---------- Login screen ---------- */
+  #login-screen{
+    min-height: 82vh;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; gap: 22px; padding: 20px;
+  }
+  .reel-mark{
+    width: 74px; height: 74px; border-radius: 50%;
+    border: 3px solid var(--accent);
+    position: relative;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .reel-mark::before, .reel-mark::after{
+    content:""; position:absolute; width:12px; height:12px; border-radius:50%;
+    background: var(--accent); opacity:0.55;
+  }
+  .reel-mark::before{ top:10px; left:16px; }
+  .reel-mark::after{ bottom:10px; right:16px; }
+  .reel-mark span{ width:10px; height:10px; border-radius:50%; background:var(--accent); }
+  #login-screen h1{ font-family: Georgia, serif; font-size: 26px; font-weight: 500; }
+  #login-screen p{ color: var(--muted); font-size: 14.5px; max-width: 320px; line-height:1.7; }
+  .btn{
+    appearance:none; border:none; cursor:pointer;
+    font-size: 15px; font-weight: 600;
+    border-radius: 12px; padding: 14px 26px;
+    display:inline-flex; align-items:center; gap:10px;
+    transition: transform .12s ease, opacity .12s ease;
+  }
+  .btn:active{ transform: scale(0.97); }
+  .btn-primary{ background: var(--accent); color: #16130A; }
+  .btn-ghost{ background: var(--surface); color: var(--text); border:1px solid var(--line); }
+  .fine-print{ font-size: 11.5px; color: #5C6472; max-width: 300px; line-height:1.6; }
 
-  for (let p = 0; p < CONFIG.maxPages && !reachedKnown; p++) {
-    const page = await fetchBookmarksFromX(userId, token);
-    const tweets = [];
-    for (const t of page.data || []) {
-      if (seen.has(t.id)) { reachedKnown = true; break; }
-      tweets.push(t);
-      newSeen.push(t.id);
-    }
-    fresh.push(...toVideoRecords(tweets, page.includes));
-    token = page.meta?.next_token;
-    if (!token) break;
+  /* ---------- Folder grid ---------- */
+  .section-label{
+    font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); margin: 22px 4px 12px;
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .folder-grid{
+    display:grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  }
+  .folder-card{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px 14px;
+    cursor: pointer;
+    position: relative;
+    overflow:hidden;
+  }
+  .folder-card:active{ background: var(--surface-2); }
+  .folder-card .count{
+    font-size: 26px; font-family: Georgia, serif; color: var(--accent);
+  }
+  .folder-card .name{ font-size: 14px; margin-top: 6px; }
+  .folder-card .perf{
+    position:absolute; inset-inline-start:0; top:0; bottom:0; width:6px;
+    background-image: repeating-linear-gradient(to bottom, var(--line) 0 4px, transparent 4px 9px);
   }
 
-  if (newSeen.length) {
-    localStorage.setItem('reel_seen_ids', JSON.stringify([...newSeen, ...seen]));
-    localStorage.setItem('reel_video_store', JSON.stringify([...fresh, ...store]));
+  /* ---------- Video list ---------- */
+  .backbar{
+    display:flex; align-items:center; gap:10px; margin: 4px 0 16px;
+    color: var(--muted); font-size: 14px; cursor:pointer;
   }
-  return { videos: fresh.length, scanned: newSeen.length };
-}
-
-// --- data source: demo → mock, real login → synced store -------------
-function isDemo() { return localStorage.getItem('reel_access_token') === 'demo'; }
-function isLocal() { return localStorage.getItem('reel_access_token') === 'local'; } // free mode: no X API, add videos by link
-
-function getVideoList() { // newest first
-  try { return JSON.parse(localStorage.getItem('reel_video_store') || '[]'); } catch { return []; }
-}
-function getAllVideos() {
-  if (isDemo()) return MOCK_VIDEOS;
-  return Object.fromEntries(getVideoList().map(v => [v.id, v]));
-}
-function getVideo(id) { return getAllVideos()[id]; }
-
-// --- user-defined folders (real mode only; demo keeps MOCK_FOLDERS) ---
-function loadCustomFolders() {
-  try { return JSON.parse(localStorage.getItem('reel_folders') || '[]'); } catch { return []; }
-}
-function saveCustomFolders(list) { localStorage.setItem('reel_folders', JSON.stringify(list)); }
-
-function loadFolderMap() {
-  if (isDemo()) return MOCK_FOLDERS;
-  const list = getVideoList();
-  const known = new Set(list.map(v => v.id));
-  const custom = loadCustomFolders().map(f => ({ ...f, videos: f.videos.filter(id => known.has(id)) }));
-  return [{ id: 'all', name: 'همه ویدیوها', videos: list.map(v => v.id), builtin: true }, ...custom];
-}
-
-function newFolderId() { return 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-
-// Used by ?add=...&folder=Name (iOS Shortcut can pass the folder directly).
-function addToFolderByName(ids, name) {
-  const folders = loadCustomFolders();
-  let f = folders.find(x => x.name === name);
-  if (!f) { f = { id: newFolderId(), name, videos: [] }; folders.push(f); }
-  for (const id of ids) if (!f.videos.includes(id)) f.videos.unshift(id);
-  saveCustomFolders(folders);
-  renderFolders();
-  return f;
-}
-
-function createFolder() {
-  const name = (prompt('اسم فولدر جدید:') || '').trim();
-  if (!name) return null;
-  const list = loadCustomFolders();
-  const f = { id: newFolderId(), name, videos: [] };
-  list.push(f);
-  saveCustomFolders(list);
-  renderFolders();
-  return f;
-}
-function renameFolder(id) {
-  const list = loadCustomFolders();
-  const f = list.find(x => x.id === id);
-  if (!f) return;
-  const name = (prompt('اسم جدید فولدر:', f.name) || '').trim();
-  if (!name) return;
-  f.name = name;
-  saveCustomFolders(list);
-  el('folder-title').textContent = name;
-  renderFolders();
-}
-function deleteFolder(id) {
-  const f = loadCustomFolders().find(x => x.id === id);
-  if (!f || !confirm(`فولدر «${f.name}» حذف بشه؟ (ویدیوها حذف نمیشن، فقط فولدر)`)) return;
-  saveCustomFolders(loadCustomFolders().filter(x => x.id !== id));
-  renderFolders();
-  el('back-to-folders').click();
-}
-function addToFolderFlow(videoIds) {
-  const ids = [].concat(videoIds);
-  let folders = loadCustomFolders();
-  const lines = folders.map((f, i) => `${i + 1}) ${f.name}`).join('\n');
-  const ans = prompt(`افزودن به کدوم فولدر؟ شماره رو بنویس:\n${lines}\n0) ساخت فولدر جدید`, folders.length ? '1' : '0');
-  if (ans === null) return;
-  const n = parseInt(ans, 10);
-  let target;
-  if (n === 0) {
-    const created = createFolder();
-    if (!created) return;
-    folders = loadCustomFolders();
-    target = folders.find(f => f.id === created.id);
-  } else {
-    target = folders[n - 1];
+  .video-row{
+    display:flex; gap:12px; align-items:center;
+    background: var(--surface); border:1px solid var(--line);
+    border-radius: 12px; padding: 10px; margin-bottom: 10px;
+    cursor:pointer;
   }
-  if (!target) return;
-  for (const id of ids) if (!target.videos.includes(id)) target.videos.unshift(id);
-  saveCustomFolders(folders);
-  renderFolders();
-  alert(`${ids.length} ویدیو به «${target.name}» اضافه شد`);
-}
-function removeFromFolder(folderId, videoId) {
-  const folders = loadCustomFolders();
-  const f = folders.find(x => x.id === folderId);
-  if (!f) return;
-  f.videos = f.videos.filter(id => id !== videoId);
-  saveCustomFolders(folders);
-  renderFolders();
-  openFolder(folderId);
-}
-
-// --- errors, user info, sync ------------------------------------------
-async function httpError(label, res) {
-  const body = await res.text().catch(() => '');
-  const e = new Error(`${label} failed: ${res.status} ${body}`);
-  e.status = res.status;
-  e.body = body;
-  return e;
-}
-
-function explainError(e) {
-  const detail = String(e.body || e.message || e).slice(0, 250);
-  const hints = {
-    401: 'توکن معتبر نیست. خروج بزن و دوباره وارد شو.',
-    402: 'معمولاً یعنی اعتبار (credit) حساب توسعه‌دهنده‌ی X خریداری نشده یا تموم شده. توی developer.x.com بخش Billing/Credits رو ببین.',
-    403: 'دسترسی رد شد: احتمالاً اسکوپ، پلن/اعتبار API یا اینکه اپ داخل یک Project نیست.',
-    429: 'محدودیت تعداد درخواست. چند دقیقه بعد دوباره امتحان کن.',
-  };
-  return (hints[e.status] ? `خطا ${e.status}: ${hints[e.status]}\n` : '') + detail;
-}
-
-function showUsername() {
-  const label = isLocal() ? 'حالت رایگان' : (localStorage.getItem('reel_username') ? '@' + localStorage.getItem('reel_username') : null);
-  const root = el('app-screen');
-  if (!label || !root) return;
-  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  let n;
-  while ((n = w.nextNode())) {
-    if (/\byou@\w*/.test(n.nodeValue)) n.nodeValue = n.nodeValue.replace(/\byou@\w*/, label);
+  .thumb{
+    width: 84px; height: 84px; border-radius: 8px; flex-shrink:0;
+    background: linear-gradient(135deg, #2A2E36, #171A1F);
+    display:flex; align-items:center; justify-content:center;
+    color: var(--accent); font-size:20px; position:relative;
   }
-}
-
-async function ensureUser() {
-  let id = localStorage.getItem('reel_user_id');
-  if (!id || !localStorage.getItem('reel_username')) {
-    const res = await xFetch(`${CONFIG.apiBase}/2/users/me`);
-    if (!res.ok) throw await httpError('users/me', res);
-    const d = (await res.json()).data;
-    localStorage.setItem('reel_user_id', d.id);
-    localStorage.setItem('reel_username', d.username);
-    id = d.id;
+  .thumb .cache-badge{
+    position:absolute; bottom:4px; inset-inline-end:4px;
+    font-size: 9px; background: rgba(63,166,107,0.9); color:#fff;
+    padding: 2px 5px; border-radius: 5px; letter-spacing:0.02em;
   }
-  showUsername();
-  return id;
-}
-
-// --- FREE MODE: add videos by pasting tweet links -----------------------
-// No X API, no login, no credits. Video info is fetched from the public
-// FxTwitter API (third-party, unofficial) via our Cloudflare Worker.
-function extractStatusIds(text) {
-  const ids = new Set();
-  let m;
-  const re = /status(?:es)?\/(\d{5,20})/g; // x.com/u/status/ID, i/status/ID, i/web/status/ID
-  while ((m = re.exec(text))) ids.add(m[1]);
-  for (const tok of String(text).split(/\s+/)) if (/^\d{15,20}$/.test(tok)) ids.add(tok); // bare IDs
-  return [...ids];
-}
-
-function fxToRecord(st) {
-  const v = (st.media?.videos || [])[0]; // videos + GIFs
-  if (!v) return null;
-  let fmts = (v.formats || []).filter(f => f.container === 'mp4' && f.url);
-  // Prefer h264 (plays everywhere); HEVC-only mp4 can fail on some desktops.
-  if (fmts.some(f => f.codec === 'h264')) fmts = fmts.filter(f => f.codec === 'h264');
-  const labelOf = (o) => (o.width && o.height) ? Math.min(o.width, o.height) + 'p' : (v.type === 'gif' ? 'GIF' : 'MP4');
-  let variants = fmts.sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0))
-    .map(f => ({ label: labelOf(f), bitrate: f.bitrate || 0, url: f.url }));
-  if (!variants.length && v.url) variants = [{ label: labelOf(v), bitrate: 0, url: v.url }];
-  if (!variants.length) return null;
-  const user = st.author?.screen_name;
-  return {
-    id: st.id,
-    author: user ? '@' + user : 'ویدیوی X',
-    text: st.text || '',
-    tweetUrl: st.url || `https://x.com/${user || 'i'}/status/${st.id}`,
-    variants,
-  };
-}
-
-async function importLinks(text) {
-  const ids = extractStatusIds(text);
-  if (!ids.length) return { msg: 'لینک توییت پیدا نشد. لینک باید شبیه x.com/…/status/123… باشه.', ids: [] };
-  const store = getVideoList();
-  const known = new Set(store.map(v => v.id));
-  const todo = ids.filter(id => !known.has(id));
-  const added = [];
-  let noVideo = 0;
-  const errors = [];
-  for (let i = 0; i < todo.length; i += 4) { // 4 at a time
-    await Promise.all(todo.slice(i, i + 4).map(async (id) => {
-      try {
-        const res = await fetch(`${CONFIG.apiBase}${CONFIG.fxPath}${id}`);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const j = await res.json();
-        const rec = fxToRecord(j.status || {});
-        if (rec) added.push(rec); else noVideo++;
-      } catch (e) {
-        errors.push(`${id}: ${e.message}`);
-      }
-    }));
+  .video-meta{ flex:1; min-width:0; }
+  .video-meta .author{ font-size: 13px; color: var(--muted); }
+  .video-meta .text{
+    font-size: 14px; margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; line-height:1.4;
   }
-  if (added.length) {
-    localStorage.setItem('reel_video_store', JSON.stringify([...added, ...store]));
-    const seen = JSON.parse(localStorage.getItem('reel_seen_ids') || '[]');
-    localStorage.setItem('reel_seen_ids', JSON.stringify([...added.map(v => v.id), ...seen]));
+  .video-meta .meta-row{ font-size:11.5px; color:#5C6472; margin-top:6px; display:flex; gap:10px; }
+
+  /* ---------- Player ---------- */
+  #player-screen{ display:none; }
+  #player-screen.active{ display:block; }
+  .player-wrap{
+    background:#000; border-radius: var(--radius); overflow:hidden;
+    aspect-ratio: 9/16; max-height: 70vh; margin: 0 auto 14px;
+    position:relative; display:flex; align-items:center; justify-content:center;
   }
-  renderFolders();
-  let msg = `${added.length} ویدیو اضافه شد`;
-  if (ids.length - todo.length) msg += `، ${ids.length - todo.length} تکراری`;
-  if (noVideo) msg += `، ${noVideo} توییت بدون ویدیو`;
-  if (errors.length) msg += `\nخطا (${errors.length}): ${errors[0]}${/HTTP 403|Forbidden/.test(errors[0]) ? ' — Worker رو با کد جدید Deploy کردی؟' : ''}`;
-  const have = new Set(getVideoList().map(v => v.id));
-  return { msg, ids: ids.filter(id => have.has(id)) }; // videos now in the library
-}
-
-async function addLinksFlow() {
-  const text = prompt('لینک توییت(ها) رو Paste کن (چندتا هم می‌تونی، با فاصله یا خط جدید):');
-  if (!text) return;
-  setStatus('در حال دریافت اطلاعات ویدیو…');
-  const r = await importLinks(text);
-  setStatus(r.msg);
-  if (r.ids.length) addToFolderFlow(r.ids); // optional: pick a folder (Cancel = skip)
-}
-
-let syncing = false;
-function setStatus(msg, isError = false) {
-  const st = el('sync-status');
-  if (!st) return;
-  st.textContent = msg;
-  st.style.color = isError ? '#e5484d' : '';
-}
-
-async function runSync() {
-  if (isDemo() || isLocal() || syncing) return;
-  syncing = true;
-  const btn = el('sync-btn');
-  if (btn) btn.disabled = true;
-  setStatus('در حال همگام‌سازی…');
-  try {
-    const userId = await ensureUser();
-    const r = await syncBookmarks(userId);
-    const total = getVideoList().length;
-    let msg = `همگام‌سازی شد — ${r.scanned} بوکمارک جدید بررسی شد، ${r.videos} ویدیوی جدید. مجموع: ${total} ویدیو.`;
-    if (r.scanned > 0 && total === 0) msg += '\nبوکمارک‌ها اومدن ولی ویدیوی مستقیم توشون نبود (ویدیوی داخل ریتوییت/نقل‌قول شمرده نمیشه).';
-    if (r.scanned === 0 && total === 0) msg += '\nX هیچ بوکمارکی برنگردوند.';
-    setStatus(msg);
-    renderFolders();
-  } catch (e) {
-    console.error(e);
-    setStatus(explainError(e), true);
-  } finally {
-    syncing = false;
-    if (btn) btn.disabled = false;
+  video{ width:100%; height:100%; object-fit:contain; background:#000; }
+  .quality-bar{
+    display:flex; align-items:center; justify-content:space-between;
+    gap:10px; margin-bottom: 18px;
   }
-}
-
-// Toolbar is injected from JS (no index.html change needed).
-const BTN_STYLE = 'background:none;color:inherit;border:1px solid rgba(128,128,128,.45);border-radius:10px;padding:6px 12px;font:inherit;font-size:13px;cursor:pointer';
-function ensureToolbar() {
-  let bar = el('reel-toolbar');
-  if (!bar) {
-    bar = document.createElement('div');
-    bar.id = 'reel-toolbar';
-    bar.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px';
-    bar.innerHTML = `
-      <button id="new-folder-btn" style="${BTN_STYLE}">+ فولدر جدید</button>
-      <button id="add-link-btn" style="${BTN_STYLE}">🔗 افزودن با لینک</button>
-      <button id="sync-btn" style="${BTN_STYLE}">↻ همگام‌سازی</button>
-      <div id="sync-status" style="flex-basis:100%;font-size:12px;opacity:.85;white-space:pre-wrap"></div>`;
-    el('folder-grid').insertAdjacentElement('beforebegin', bar);
-    el('new-folder-btn').addEventListener('click', createFolder);
-    el('sync-btn').addEventListener('click', runSync);
-    el('add-link-btn').addEventListener('click', addLinksFlow);
+  .quality-select{
+    display:flex; gap:6px; background: var(--surface); border:1px solid var(--line);
+    border-radius: 999px; padding: 4px;
   }
-  const mode = isDemo() ? 'demo' : isLocal() ? 'local' : 'api';
-  if (bar.dataset.mode !== mode) { bar.dataset.mode = mode; setStatus(''); } // drop stale messages from another mode
-  const hide = isDemo();
-  el('new-folder-btn').style.display = hide ? 'none' : '';
-  el('sync-btn').style.display = (hide || isLocal()) ? 'none' : ''; // API sync only in API mode
-  el('add-link-btn').style.display = hide ? 'none' : '';
-}
-
-function renderFolderActions() {
-  let box = el('folder-actions');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'folder-actions';
-    box.style.cssText = 'display:flex;gap:8px;margin:8px 0';
-    el('folder-title').insertAdjacentElement('afterend', box);
+  .quality-select button{
+    appearance:none; border:none; background:transparent; color:var(--muted);
+    font-size:12.5px; padding:6px 12px; border-radius:999px; cursor:pointer;
   }
-  if (isDemo() || !currentFolder || currentFolder.builtin) { box.innerHTML = ''; return; }
-  box.innerHTML = `
-    <button id="rename-folder-btn" style="${BTN_STYLE}">تغییر نام</button>
-    <button id="delete-folder-btn" style="${BTN_STYLE}">حذف فولدر</button>`;
-  el('rename-folder-btn').onclick = () => renameFolder(currentFolder.id);
-  el('delete-folder-btn').onclick = () => deleteFolder(currentFolder.id);
-}
+  .quality-select button.active{ background: var(--accent); color:#16130A; font-weight:600; }
+  .net-hint{ font-size:11.5px; color:#5C6472; display:flex; align-items:center; gap:6px; }
+  .net-hint .sig{width:6px;height:6px;border-radius:50%; background:#3FA66B;}
+  .player-caption{ font-size:14.5px; line-height:1.7; margin-bottom:10px; }
+  .player-actions{ display:flex; gap:10px; }
 
-function rowActionBtn(videoId) {
-  if (isDemo()) return '';
-  const remove = currentFolder && !currentFolder.builtin;
-  return `<button class="row-act" data-act="${remove ? 'remove' : 'add'}" data-id="${videoId}" style="${BTN_STYLE};padding:3px 8px;font-size:12px;margin-inline-start:auto">${remove ? '✕ حذف از فولدر' : '📁 افزودن به فولدر'}</button>`;
-}
+  .hidden{ display:none !important; }
+  #app-screen{ display:none; }
+  #app-screen.active{ display:block; }
 
-// ---------------------------------------------------------------------
-// 5. UI STATE + RENDERING
-// ---------------------------------------------------------------------
-let currentFolder = null;
-let currentVideo = null;
-let currentVariantIndex = 0;
+  ::-webkit-scrollbar{ display:none; }
+</style>
+</head>
+<body>
 
-const el = (id) => document.getElementById(id);
+<!-- ============ LOGIN SCREEN ============ -->
+<div id="login-screen">
+  <div class="reel-mark"><span></span></div>
+  <h1>Reel</h1>
+  <p>آرشیو شخصی ویدیوهای بوکمارک‌شده‌ات از X، دسته‌بندی‌شده در فولدر، با کیفیت قابل انتخاب و کش داخلی.</p>
+  <button class="btn btn-primary" id="login-btn">ورود با حساب X</button>
+  <button class="btn btn-ghost" id="demo-btn">حالت دمو (بدون لاگین واقعی)</button>
+  <p class="fine-print">با ورود، این اپ فقط به بوکمارک‌های خودت (Owned Read) دسترسی می‌خواد. توکن فقط روی همین دستگاه ذخیره میشه.</p>
+</div>
 
-function renderFolders() {
-  const grid = el('folder-grid');
-  const folders = loadFolderMap();
-  ensureToolbar();
-  el('folder-total').textContent = `${folders.length} فولدر`;
-  grid.innerHTML = folders.map(f => `
-    <div class="folder-card" data-id="${f.id}">
-      <div class="perf"></div>
-      <div class="count">${f.videos.length}</div>
-      <div class="name">${esc(f.name)}</div>
+<!-- ============ APP SHELL ============ -->
+<div id="app-screen">
+  <header class="top">
+    <div class="brand"><span class="dot"></span> Reel</div>
+    <div class="account-pill" id="logout-btn"><span class="status-dot"></span> <span id="account-name">@you</span> · خروج</div>
+  </header>
+
+  <main>
+    <!-- Folder grid -->
+    <div id="folders-view">
+      <div class="section-label">فولدرها <span id="folder-total">۴ فولدر</span></div>
+      <div class="folder-grid" id="folder-grid"></div>
     </div>
-  `).join('');
-  grid.querySelectorAll('.folder-card').forEach(card => {
-    card.addEventListener('click', () => openFolder(card.dataset.id));
-  });
-}
 
-async function openFolder(folderId) {
-  const folders = loadFolderMap();
-  currentFolder = folders.find(f => f.id === folderId);
-  el('folder-title').textContent = currentFolder.name;
-  renderFolderActions();
-  el('folders-view').classList.add('hidden');
-  el('videos-view').classList.remove('hidden');
-  el('player-screen').classList.remove('active');
+    <!-- Video list inside a folder -->
+    <div id="videos-view" class="hidden">
+      <div class="backbar" id="back-to-folders">← بازگشت به فولدرها</div>
+      <div class="section-label" id="folder-title">—</div>
+      <div id="video-list"></div>
+    </div>
 
-  const list = el('video-list');
-  const rows = await Promise.all(currentFolder.videos.map(async (vid) => {
-    const v = getVideo(vid);
-    const cached = await isVideoCached(v);
-    return `
-      <div class="video-row" data-id="${v.id}">
-        <div class="thumb">▶${cached ? '<span class="cache-badge">کش‌شده</span>' : ''}</div>
-        <div class="video-meta">
-          <div class="author">${esc(v.author)}</div>
-          <div class="text">${esc(v.text)}</div>
-          <div class="meta-row"><span>${v.variants.length} کیفیت موجود</span>${rowActionBtn(v.id)}</div>
-        </div>
-      </div>`;
-  }));
-  list.innerHTML = rows.join('');
-  list.querySelectorAll('.video-row').forEach(row => {
-    row.addEventListener('click', () => openPlayer(row.dataset.id));
-  });
-  list.querySelectorAll('.row-act').forEach(btn => {
-    btn.addEventListener('click', (ev) => {
-      ev.stopPropagation(); // don't open the player
-      if (btn.dataset.act === 'add') addToFolderFlow(btn.dataset.id);
-      else removeFromFolder(currentFolder.id, btn.dataset.id);
-    });
-  });
-}
+    <!-- Player -->
+    <div id="player-screen">
+      <div class="backbar" id="back-to-videos">← بازگشت به لیست</div>
+      <div class="player-wrap">
+        <video id="video-el" playsinline controls></video>
+      </div>
+      <div class="quality-bar">
+        <div class="quality-select" id="quality-select"></div>
+        <div class="net-hint"><span class="sig"></span> <span id="net-label">Wi-Fi</span></div>
+      </div>
+      <div class="player-caption" id="player-caption"></div>
+      <div class="player-actions">
+        <button class="btn btn-ghost" id="cache-btn">ذخیره برای آفلاین</button>
+        <button class="btn btn-ghost" id="open-x-btn">مشاهده در X</button>
+        <a class="btn btn-ghost" id="test-url-btn" href="#" target="_blank" rel="noopener">تست لینک خام ویدیو</a>
+      </div>
+    </div>
+  </main>
+</div>
 
-async function openPlayer(videoId) {
-  currentVideo = getVideo(videoId);
-  currentVariantIndex = currentVideo.variants.length - 1; // default: highest quality
-  el('videos-view').classList.add('hidden');
-  el('player-screen').classList.add('active');
-  el('player-caption').textContent = `${currentVideo.author} — ${currentVideo.text}`;
-  el('open-x-btn').onclick = () => window.open(currentVideo.tweetUrl, '_blank', 'noopener');
-  renderQualitySelect();
-  await loadVariant(currentVariantIndex);
-  updateNetHint();
-}
-
-function renderQualitySelect() {
-  const wrap = el('quality-select');
-  wrap.innerHTML = currentVideo.variants.map((v, i) =>
-    `<button data-i="${i}" class="${i === currentVariantIndex ? 'active' : ''}">${v.label}</button>`
-  ).join('');
-  wrap.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const i = Number(btn.dataset.i);
-      if (i === currentVariantIndex) return;
-      const t = el('video-el').currentTime; // preserve playback position across quality switch
-      currentVariantIndex = i;
-      renderQualitySelect();
-      await loadVariant(i, t);
-    });
-  });
-}
-
-async function loadVariant(index, resumeAt = 0) {
-  const variant = currentVideo.variants[index];
-  const videoEl = el('video-el');
-  const cachedUrl = await getCachedUrl(variant.url);
-  videoEl.src = cachedUrl || variant.url;
-  videoEl.currentTime = resumeAt;
-  videoEl.play().catch(() => {}); // autoplay may be blocked until user gesture; fine on click-through
-  el('cache-btn').textContent = cachedUrl ? 'ذخیره‌شده ✓' : 'ذخیره برای آفلاین';
-}
-
-function updateNetHint() {
-  // navigator.connection is NOT available in iOS Safari — this degrades
-  // gracefully to a static label there, which is why manual quality
-  // selection (not auto ABR) is the right call for this app.
-  const conn = navigator.connection || navigator.webkitConnection;
-  el('net-label').textContent = conn?.effectiveType ? conn.effectiveType.toUpperCase() : 'نامشخص';
-}
-
-// ---------------------------------------------------------------------
-// 6. OFFLINE CACHE — Cache Storage API (works in iOS Safari PWAs, with
-// the caveat noted earlier: unused installed PWAs may have their cache
-// evicted by WebKit after a period of inactivity).
-// ---------------------------------------------------------------------
-async function getCachedUrl(url) {
-  if (!('caches' in window)) return null;
-  const cache = await caches.open(CACHE_NAME);
-  const match = await cache.match(url);
-  return match ? url : null; // service worker serves cached response transparently on this URL
-}
-
-async function isVideoCached(video) {
-  if (!('caches' in window)) return false;
-  const cache = await caches.open(CACHE_NAME);
-  for (const v of video.variants) {
-    if (await cache.match(v.url)) return true;
-  }
-  return false;
-}
-
-el('cache-btn')?.addEventListener('click', async () => {
-  if (!('caches' in window)) { alert('کش در این مرورگر پشتیبانی نمیشه'); return; }
-  const variant = currentVideo.variants[currentVariantIndex];
-  const cache = await caches.open(CACHE_NAME);
-  el('cache-btn').textContent = 'در حال ذخیره…';
-  try {
-    await cache.add(variant.url);
-    el('cache-btn').textContent = 'ذخیره‌شده ✓';
-  } catch (e) {
-    el('cache-btn').textContent = 'خطا در ذخیره';
-  }
-});
-
-// ---------------------------------------------------------------------
-// 7. NAVIGATION WIRING
-// ---------------------------------------------------------------------
-el('back-to-folders').addEventListener('click', () => {
-  el('videos-view').classList.add('hidden');
-  el('folders-view').classList.remove('hidden');
-});
-el('back-to-videos').addEventListener('click', () => {
-  el('video-el').pause();
-  el('player-screen').classList.remove('active');
-  el('videos-view').classList.remove('hidden');
-});
-el('login-btn').addEventListener('click', startLogin);
-el('demo-btn').addEventListener('click', () => {
-  // Lets you test the whole UI/player/cache flow right now, with mock
-  // data, before you have real X API credentials. Remove this button
-  // once CONFIG.clientId is filled in and real login works.
-  localStorage.setItem('reel_access_token', 'demo');
-  el('login-screen').classList.add('hidden');
-  el('app-screen').classList.add('active');
-  renderFolders();
-});
-// Free-mode entry button, injected next to the demo button (no index.html change).
-(function addFreeModeButton() {
-  const demo = el('demo-btn');
-  if (!demo) return;
-  if (!CONFIG.enableApiLogin && el('login-btn')) el('login-btn').style.display = 'none';
-  const b = document.createElement('button');
-  b.id = 'free-btn';
-  b.className = demo.className;
-  b.textContent = 'ورود رایگان (بدون X) — افزودن با لینک';
-  b.addEventListener('click', () => {
-    localStorage.setItem('reel_access_token', 'local');
-    el('login-screen').classList.add('hidden');
-    el('app-screen').classList.add('active');
-    renderFolders();
-    showUsername();
-  });
-  demo.insertAdjacentElement('beforebegin', b);
-})();
-el('logout-btn').addEventListener('click', () => {
-  ['reel_access_token', 'reel_refresh_token', 'reel_token_expires_at', 'reel_user_id', 'reel_username']
-    .forEach(k => localStorage.removeItem(k));
-  el('video-el')?.pause();
-  el('player-screen').classList.remove('active');
-  el('videos-view').classList.add('hidden');
-  el('folders-view').classList.remove('hidden');
-  el('app-screen').classList.remove('active');
-  el('login-screen').classList.remove('hidden');
-});
-
-// ---------------------------------------------------------------------
-// 8. BOOTSTRAP
-// ---------------------------------------------------------------------
-async function bootstrap() {
-  // Handle OAuth callback (?code=...&state=...)
-  const params = new URLSearchParams(window.location.search);
-  if (params.has('code')) {
-    // Stored in localStorage (not sessionStorage) so the flow survives a new
-    // tab/window. Consumed exactly once: a duplicate load of the same callback
-    // URL finds nothing pending and is ignored silently.
-    const pendingState = localStorage.getItem('pkce_state');
-    try {
-      if (pendingState) {
-        if (params.get('state') !== pendingState) throw new Error('state mismatch');
-        const token = await exchangeCodeForToken(params.get('code'));
-        localStorage.removeItem('pkce_state');
-        localStorage.removeItem('pkce_verifier');
-        saveTokens(token);
-      }
-    } catch (e) {
-      console.error(e);
-      localStorage.removeItem('pkce_state');
-      localStorage.removeItem('pkce_verifier');
-      alert('ورود ناموفق بود:\n' + String(e.message).slice(0, 400));
-    } finally {
-      window.history.replaceState({}, '', CONFIG.redirectUri); // strip ?code from URL
-    }
-  }
-
-  // API login disabled → convert any leftover API session to free mode.
-  if (!CONFIG.enableApiLogin && isLoggedIn() && !isDemo() && !isLocal()) {
-    ['reel_refresh_token', 'reel_token_expires_at', 'reel_user_id', 'reel_username'].forEach(k => localStorage.removeItem(k));
-    localStorage.setItem('reel_access_token', 'local');
-  }
-
-  // ?add=<tweet url> (from an iOS Shortcut / share sheet) → free mode import
-  const addParam = params.get('add');
-  if (addParam && !isLoggedIn()) localStorage.setItem('reel_access_token', 'local');
-
-  if (isLoggedIn()) {
-    el('login-screen').classList.add('hidden');
-    el('app-screen').classList.add('active');
-    renderFolders();
-
-    if (isLocal()) showUsername();
-    // API mode → sync once on open (manual button too). Free/demo modes don't call X.
-    if (!isDemo() && !isLocal()) { showUsername(); runSync(); }
-
-    if (addParam && !isDemo()) {
-      window.history.replaceState({}, '', CONFIG.redirectUri);
-      setStatus('در حال دریافت اطلاعات ویدیو…');
-      const r = await importLinks(addParam);
-      setStatus(r.msg);
-      if (r.ids.length) {
-        const folderName = (params.get('folder') || '').trim();
-        if (folderName) addToFolderByName(r.ids, folderName); // straight into the named folder
-        else addToFolderFlow(r.ids);                          // otherwise ask which folder
-      }
-    }
-  }
-
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(console.error);
-  }
-}
-
-bootstrap();
+<script src="app.js"></script>
+</body>
+</html>
