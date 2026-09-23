@@ -12,7 +12,7 @@ const CACHE_NAME = 'reel-video-cache-v1';
 const CONFIG = {
   clientId: 'TkhiM2N1SXJ3RC1CZ2dhMnEtZ246MTpjaQ',              // from X Developer Portal (OAuth 2.0, "public client" type enables PKCE without a secret)
   // Must match the Callback URI in the X portal BYTE FOR BYTE, e.g.
-  // https://medicocoder.github.io/reel-app/  (with trailing slash, no index.html).
+  // https://USERNAME.github.io/reel-app/  (with trailing slash, no index.html).
   // Computed so that opening .../reel-app/index.html still yields the canonical URL.
   redirectUri: window.location.origin + window.location.pathname.replace(/index\.html$/, '').replace(/([^/])$/, '$1/'),
   authEndpoint: 'https://x.com/i/oauth2/authorize',
@@ -483,7 +483,7 @@ async function bootstrap() {
       saveTokens(token);
     } catch (e) {
       console.error(e);
-      alert('ورود ناموفق بود — کنسول رو برای جزئیات ببین');
+      alert('ورود ناموفق بود:\n' + String(e.message).slice(0, 400));
     } finally {
       window.history.replaceState({}, '', CONFIG.redirectUri); // strip ?code from URL
     }
