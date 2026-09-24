@@ -427,6 +427,7 @@ function backupData() {
     folders: loadCustomFolders(),
     videos: getVideoList(),
     seenIds: JSON.parse(localStorage.getItem('reel_seen_ids') || '[]'),
+    qualityPrefs: loadQualityPrefs(), // default-quality ranges (per folder / global)
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -457,6 +458,11 @@ function restoreFromPayload(payload) {
   const existingSeen = new Set(JSON.parse(localStorage.getItem('reel_seen_ids') || '[]'));
   (payload.seenIds || []).forEach(id => existingSeen.add(id));
   localStorage.setItem('reel_seen_ids', JSON.stringify([...existingSeen]));
+
+  // Quality prefs: keep the current device's choices, fill in missing ones from the backup.
+  if (payload.qualityPrefs && typeof payload.qualityPrefs === 'object') {
+    localStorage.setItem('reel_quality_prefs', JSON.stringify({ ...payload.qualityPrefs, ...loadQualityPrefs() }));
+  }
 
   return { videos: mergedVideos.length, folders: mergedFolders.length };
 }
@@ -530,18 +536,25 @@ function ensureToolbar() {
   el('backup-btn').style.display = hide ? 'none' : '';
   el('restore-btn').style.display = hide ? 'none' : '';
 }
+// Folder header buttons: the scroll feed is available for every folder;
+// rename/delete only for user-made folders.
 function renderFolderActions() {
   let box = el('folder-actions');
   if (!box) {
     box = document.createElement('div');
     box.id = 'folder-actions';
-    box.style.cssText = 'display:flex;gap:8px;margin:8px 0';
+    box.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:8px 0';
     el('folder-title').insertAdjacentElement('afterend', box);
   }
-  if (isDemo() || !currentFolder || currentFolder.builtin) { box.innerHTML = ''; return; }
-  box.innerHTML = `<button id="rename-folder-btn" style="${BTN_STYLE}">تغییر نام</button><button id="delete-folder-btn" style="${BTN_STYLE}">حذف فولدر</button>`;
-  el('rename-folder-btn').onclick = () => renameFolder(currentFolder.id);
-  el('delete-folder-btn').onclick = () => deleteFolder(currentFolder.id);
+  if (!currentFolder) { box.innerHTML = ''; return; }
+  const canEdit = !isDemo() && !currentFolder.builtin;
+  box.innerHTML = `<button id="feed-open-btn" style="${BTN_STYLE}">▶ نمای اسکرولی</button>` +
+    (canEdit ? `<button id="rename-folder-btn" style="${BTN_STYLE}">تغییر نام</button><button id="delete-folder-btn" style="${BTN_STYLE}">حذف فولدر</button>` : '');
+  el('feed-open-btn').onclick = () => openFeed(currentFolder.id);
+  if (canEdit) {
+    el('rename-folder-btn').onclick = () => renameFolder(currentFolder.id);
+    el('delete-folder-btn').onclick = () => deleteFolder(currentFolder.id);
+  }
 }
 function rowActionBtn(videoId) {
   if (isDemo()) return '';
@@ -589,13 +602,315 @@ async function openFolder(folderId) {
         </div></div>`;
   }));
   list.innerHTML = rows.join('');
-  list.querySelectorAll('.video-row').forEach(row => row.addEventListener('click', () => openPlayer(row.dataset.id)));
+  // Tapping a row now opens the scroll feed at that video.
+  list.querySelectorAll('.video-row').forEach(row => row.addEventListener('click', () => openFeed(currentFolder.id, row.dataset.id)));
   list.querySelectorAll('.row-act').forEach(btn => btn.addEventListener('click', (ev) => {
     ev.stopPropagation();
     if (btn.dataset.act === 'add') addToFolderFlow(btn.dataset.id); else removeFromFolder(currentFolder.id, btn.dataset.id);
   }));
 }
 
+// =====================================================================
+// DEFAULT QUALITY = a resolution RANGE (min..max), per folder or global.
+// Resolution of a variant = its label number ("720p", "720p (2176k)").
+// Rule: pick the BEST variant inside the range; if none fits, the
+// closest one to the range. No preference set → highest quality.
+// =====================================================================
+const RES_MIN_OPTS = [[0, 'بدون حداقل'], [320, '320p'], [360, '360p'], [480, '480p'], [720, '720p'], [1080, '1080p']];
+const RES_MAX_OPTS = [[0, 'بدون سقف'], [360, '360p'], [480, '480p'], [720, '720p'], [1080, '1080p']];
+
+function resOfVariant(v) {
+  if (typeof v.res === 'number') return v.res;
+  const m = String(v.label || '').match(/^(\d{3,4})p/);
+  return m ? +m[1] : null; // GIF / MP4 / kbps labels → unknown
+}
+function pickVariantIndex(variants, pref) {
+  const last = variants.length - 1;
+  if (!pref || (!pref.min && !pref.max)) return last;
+  const min = pref.min || 0, max = pref.max || Infinity;
+  const known = variants.map((v, i) => ({ i, r: resOfVariant(v) })).filter(x => x.r != null);
+  if (!known.length) return last;
+  const inside = known.filter(x => x.r >= min && x.r <= max);
+  if (inside.length) return inside.reduce((a, b) => (b.r >= a.r ? b : a)).i; // best inside the range (ties → higher bitrate)
+  const dist = (x) => (x.r < min ? min - x.r : x.r - max);
+  return known.reduce((a, b) => (dist(b) < dist(a) || (dist(b) === dist(a) && b.r < a.r) ? b : a)).i;
+}
+function loadQualityPrefs() { try { return JSON.parse(localStorage.getItem('reel_quality_prefs') || '{}'); } catch { return {}; } }
+function getQualityPref(folderId) { const p = loadQualityPrefs(); return p[folderId] || p._all || null; }
+function qualityPrefSource(folderId) { const p = loadQualityPrefs(); return p[folderId] ? 'folder' : p._all ? 'all' : null; }
+function saveQualityPref(scope, pref) { // scope = folder id, or '_all'
+  const p = loadQualityPrefs();
+  if (pref) p[scope] = pref; else delete p[scope];
+  localStorage.setItem('reel_quality_prefs', JSON.stringify(p));
+}
+function prefLabel(pref) {
+  if (!pref || (!pref.min && !pref.max)) return 'بالاترین';
+  if (pref.min && pref.max) return `${pref.min}–${pref.max}p`;
+  return pref.max ? `≤${pref.max}p` : `≥${pref.min}p`;
+}
+
+// =====================================================================
+// SCROLL FEED — every video of a folder, one per screen, vertical snap.
+// Only videos near the screen get a src (saves data/memory); the one
+// in view plays, the rest pause. Manual per-video quality overrides the
+// default until you leave the feed.
+// =====================================================================
+const FB = 'background:#ffffff26;color:#fff;border:0;border-radius:999px;padding:7px 12px;font:inherit;font-size:13px;cursor:pointer;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)';
+const FSEL = 'width:100%;margin-top:4px;padding:8px;border-radius:8px;font:inherit;background:#2c2c2e;color:#fff;border:1px solid #ffffff33';
+let feed = null;        // { folderId, videos, picks, active, near, act }
+let feedMuted = false;  // starts with sound; falls back to muted if the browser blocks autoplay
+
+function feedVariantIndex(v) {
+  return feed.picks[v.id] ?? pickVariantIndex(v.variants, getQualityPref(feed.folderId));
+}
+function feedVideoSrc(url) { return isDemo() ? url : proxiedVideoUrl(url); }
+function updateMuteBtn() { el('feed-mute').textContent = feedMuted ? '🔇' : '🔊'; }
+
+function tryPlay(vid) {
+  if (!vid.getAttribute('src')) return; // not loaded yet — feedLoad starts it
+  vid.muted = feedMuted;
+  vid.play().catch((e) => {
+    if (e.name === 'NotAllowedError' && !vid.muted) { feedMuted = true; updateMuteBtn(); vid.muted = true; vid.play().catch(() => {}); }
+  });
+}
+
+async function cacheVariantUrl(url) {
+  const cache = await caches.open(CACHE_NAME);
+  let res;
+  try {
+    res = await fetch(new Request(url, { referrerPolicy: 'no-referrer' }));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+  } catch (e) { // direct fetch blocked (CORS/403) → go through the Worker
+    res = await fetch(proxiedVideoUrl(url));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+  }
+  await cache.put(url, res);
+}
+
+async function refreshItemUI(sec) {
+  const v = feed.videos[+sec.dataset.i];
+  const idx = feedVariantIndex(v);
+  sec.querySelector('.fi-q').textContent = '⚙ ' + v.variants[idx].label;
+  sec.querySelector('.fi-variants').innerHTML = v.variants.map((x, j) =>
+    `<button class="fi-var" data-j="${j}" style="${FB};${j === idx ? 'background:#fff;color:#000' : ''}">${esc(x.label)}</button>`).join('');
+  const cached = 'caches' in window && await getCachedUrl(v.variants[idx].url);
+  const sv = sec.querySelector('.fi-save');
+  if (sv) sv.textContent = cached ? '💾 ذخیره‌شده ✓' : '💾 ذخیره آفلاین';
+}
+
+async function feedLoad(sec) {
+  if (!feed) return;
+  const v = feed.videos[+sec.dataset.i];
+  const vid = sec.querySelector('video');
+  const variant = v.variants[feedVariantIndex(v)];
+  if (vid.dataset.url === variant.url) { refreshItemUI(sec); return; }
+  const keep = vid.dataset.url ? vid.currentTime : 0; // quality switch → resume where we were
+  vid.dataset.url = variant.url;
+  vid.preload = 'metadata';
+  const src = (await getCachedUrl(variant.url)) || feedVideoSrc(variant.url);
+  if (!feed || vid.dataset.url !== variant.url) return; // closed or changed meanwhile
+  vid.src = src;
+  if (keep) vid.addEventListener('loadedmetadata', () => { vid.currentTime = keep; }, { once: true });
+  refreshItemUI(sec);
+  if (sec === feed.active) tryPlay(vid);
+}
+function feedUnload(sec) {
+  const vid = sec.querySelector('video');
+  if (!vid.dataset.url) return;
+  vid.pause();
+  vid.removeAttribute('src');
+  vid.load();
+  delete vid.dataset.url;
+}
+
+function buildFeedItem(v, i) {
+  const sec = document.createElement('section');
+  sec.className = 'feed-item';
+  sec.dataset.i = i;
+  sec.style.cssText = 'height:100%;position:relative;scroll-snap-align:start;scroll-snap-stop:always;background:#000;overflow:hidden';
+  sec.innerHTML = `
+    <video playsinline loop preload="none" style="width:100%;height:100%;object-fit:contain;background:#000"></video>
+    <div class="fi-msg" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;font-size:13px;padding:24px;text-align:center;opacity:.85"></div>
+    <div style="position:absolute;left:0;right:0;bottom:0;height:3px;background:#ffffff33"><div class="fi-bar" style="height:100%;width:0;background:#fff"></div></div>
+    <div style="position:absolute;left:0;right:0;bottom:3px;padding:48px 14px calc(14px + env(safe-area-inset-bottom,0px));background:linear-gradient(#0000,#000c);pointer-events:none">
+      <div dir="auto" style="font-weight:600;font-size:14px">${esc(v.author)}</div>
+      <div dir="auto" style="font-size:13px;opacity:.9;max-height:3.9em;overflow:hidden;margin:4px 0 10px">${esc(v.text)}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;pointer-events:auto">
+        <button class="fi-q" style="${FB}">⚙ کیفیت</button>
+        <button class="fi-save" style="${FB}">💾 ذخیره آفلاین</button>
+        <button class="fi-open" style="${FB}">↗ باز کردن در X</button>
+      </div>
+      <div class="fi-variants" style="display:none;gap:6px;flex-wrap:wrap;margin-top:8px;pointer-events:auto"></div>
+    </div>`;
+  const vid = sec.querySelector('video');
+  const msg = sec.querySelector('.fi-msg');
+  const bar = sec.querySelector('.fi-bar');
+  vid.addEventListener('loadstart', () => { if (vid.getAttribute('src')) msg.textContent = '⏳'; });
+  vid.addEventListener('loadeddata', () => { msg.textContent = ''; });
+  vid.addEventListener('playing', () => { msg.textContent = ''; });
+  vid.addEventListener('timeupdate', () => { bar.style.width = (vid.duration ? (vid.currentTime / vid.duration) * 100 : 0) + '%'; });
+  vid.addEventListener('error', () => {
+    if (!vid.getAttribute('src')) return;
+    msg.textContent = '▲ پخش نشد — ' + (MEDIA_ERROR_MSG[vid.error?.code] || 'خطای نامشخص');
+  });
+  return sec;
+}
+
+function onNear(entries) { for (const e of entries) { if (e.isIntersecting) feedLoad(e.target); else feedUnload(e.target); } }
+function onActive(entries) {
+  if (!feed) return;
+  for (const e of entries) {
+    const vid = e.target.querySelector('video');
+    if (e.isIntersecting) {
+      feed.active = e.target;
+      el('feed-count').textContent = `${+e.target.dataset.i + 1}/${feed.videos.length}`;
+      tryPlay(vid);
+    } else {
+      if (feed.active === e.target) feed.active = null;
+      vid.pause();
+    }
+  }
+}
+
+function feedApplyPref() {
+  el('feed-q').textContent = '⚙ ' + prefLabel(getQualityPref(feed.folderId));
+  for (const sec of el('feed-scroll').children) {
+    if (sec.querySelector('video').dataset.url) feedLoad(sec); // reloads only if the chosen variant changed; manual picks stay
+  }
+}
+function openQualitySheet() {
+  const pref = getQualityPref(feed.folderId) || { min: 0, max: 0 };
+  el('q-min').value = String(pref.min || 0);
+  el('q-max').value = String(pref.max || 0);
+  const src = qualityPrefSource(feed.folderId);
+  el('q-src').textContent = 'تنظیم فعلی: ' + (src === 'folder' ? 'مخصوص این فولدر' : src === 'all' ? 'برای همه فولدرها' : 'تنظیم نشده (بالاترین کیفیت)');
+  el('feed-sheet').style.display = 'block';
+}
+function readSheetPref() {
+  let min = +el('q-min').value, max = +el('q-max').value;
+  if (min && max && min > max) [min, max] = [max, min];
+  return (min || max) ? { min, max } : null;
+}
+
+function ensureFeedOverlay() {
+  let ov = el('reel-feed');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'reel-feed';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:1000;background:#000;color:#fff;display:none';
+  ov.innerHTML = `
+    <div style="position:absolute;top:0;left:0;right:0;z-index:4;display:flex;gap:8px;align-items:center;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 24px;background:linear-gradient(#000a,#0000);pointer-events:none">
+      <button id="feed-close" style="${FB};pointer-events:auto">✕</button>
+      <div id="feed-title" dir="auto" style="flex:1;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+      <div id="feed-count" style="font-size:12px;opacity:.85"></div>
+      <button id="feed-mute" style="${FB};pointer-events:auto">🔊</button>
+      <button id="feed-q" style="${FB};pointer-events:auto">⚙ بالاترین</button>
+    </div>
+    <div id="feed-scroll" style="height:100%;overflow-y:scroll;scroll-snap-type:y mandatory;-webkit-overflow-scrolling:touch;overscroll-behavior:contain"></div>
+    <div id="feed-sheet" style="position:absolute;inset:0;z-index:6;display:none;background:#0009">
+      <div style="position:absolute;left:0;right:0;bottom:0;background:#1c1c1e;border-radius:18px 18px 0 0;padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px));max-height:90%;overflow:auto">
+        <div style="font-weight:600;margin-bottom:4px">کیفیت پیش‌فرض (بازه‌ی رزولوشن)</div>
+        <div style="font-size:12px;opacity:.75;margin-bottom:12px">بهترین کیفیتِ داخل بازه انتخاب میشه؛ اگه ویدیویی چنین کیفیتی نداشت، نزدیک‌ترین. برای هر ویدیو می‌تونی دستی عوضش کنی.</div>
+        <div style="display:flex;gap:10px;margin-bottom:8px">
+          <label style="flex:1;font-size:12px">حداقل<select id="q-min" style="${FSEL}">${RES_MIN_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+          <label style="flex:1;font-size:12px">حداکثر<select id="q-max" style="${FSEL}">${RES_MAX_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+        </div>
+        <div id="q-src" style="font-size:12px;opacity:.75;margin-bottom:12px"></div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button id="q-save-folder" style="${FB};border-radius:12px;padding:10px">ذخیره برای این فولدر</button>
+          <button id="q-save-all" style="${FB};border-radius:12px;padding:10px">ذخیره برای همه فولدرها</button>
+          <button id="q-reset" style="${FB};border-radius:12px;padding:10px">بازنشانی (بالاترین کیفیت)</button>
+          <button id="q-close" style="${FB};border-radius:12px;padding:10px">بستن</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+
+  el('feed-close').addEventListener('click', closeFeed);
+  el('feed-mute').addEventListener('click', () => {
+    feedMuted = !feedMuted;
+    updateMuteBtn();
+    const vid = feed?.active?.querySelector('video');
+    if (vid) { vid.muted = feedMuted; if (vid.paused) tryPlay(vid); }
+  });
+  el('feed-q').addEventListener('click', openQualitySheet);
+  el('q-close').addEventListener('click', () => { el('feed-sheet').style.display = 'none'; });
+  const applyAndClose = () => { el('feed-sheet').style.display = 'none'; feedApplyPref(); };
+  el('q-save-folder').addEventListener('click', () => { saveQualityPref(feed.folderId, readSheetPref()); applyAndClose(); });
+  el('q-save-all').addEventListener('click', () => { saveQualityPref('_all', readSheetPref()); saveQualityPref(feed.folderId, null); applyAndClose(); });
+  el('q-reset').addEventListener('click', () => { saveQualityPref('_all', null); saveQualityPref(feed.folderId, null); applyAndClose(); });
+
+  // One delegated click handler for everything inside the feed items.
+  el('feed-scroll').addEventListener('click', async (e) => {
+    const sec = e.target.closest('.feed-item');
+    if (!sec || !feed) return;
+    const v = feed.videos[+sec.dataset.i];
+    const b = e.target.closest('button');
+    if (!b) { // tap on the video = play / pause
+      const vid = sec.querySelector('video');
+      if (vid.paused) tryPlay(vid); else vid.pause();
+      return;
+    }
+    if (b.classList.contains('fi-q')) {
+      const row = sec.querySelector('.fi-variants');
+      row.style.display = row.style.display === 'none' ? 'flex' : 'none';
+    } else if (b.classList.contains('fi-var')) {
+      feed.picks[v.id] = +b.dataset.j; // manual choice for this video only
+      sec.querySelector('.fi-variants').style.display = 'none';
+      feedLoad(sec);
+    } else if (b.classList.contains('fi-open')) {
+      window.open(v.tweetUrl, '_blank', 'noopener');
+    } else if (b.classList.contains('fi-save')) {
+      if (!('caches' in window)) { alert('کش در این مرورگر پشتیبانی نمیشه'); return; }
+      b.textContent = 'در حال ذخیره…';
+      try { await cacheVariantUrl(v.variants[feedVariantIndex(v)].url); } catch (err) { console.error('cache save failed:', err); b.textContent = 'خطا در ذخیره'; return; }
+      refreshItemUI(sec);
+    }
+  });
+  return ov;
+}
+
+function teardownFeed() {
+  if (!feed) return;
+  feed.near.disconnect();
+  feed.act.disconnect();
+  const scroll = el('feed-scroll');
+  scroll.querySelectorAll('video').forEach(v => { v.pause(); v.removeAttribute('src'); v.load(); });
+  scroll.innerHTML = '';
+  el('feed-sheet').style.display = 'none';
+  el('reel-feed').style.display = 'none';
+  document.body.style.overflow = '';
+  feed = null;
+}
+function closeFeed() {
+  teardownFeed();
+  if (currentFolder) openFolder(currentFolder.id); // refresh "cached" badges
+}
+
+function openFeed(folderId, startId) {
+  const folder = loadFolderMap().find(f => f.id === folderId);
+  const videos = (folder?.videos || []).map(getVideo).filter(Boolean);
+  if (!videos.length) { alert('این فولدر ویدیویی نداره'); return; }
+  teardownFeed();
+  const ov = ensureFeedOverlay();
+  feed = { folderId, videos, picks: {}, active: null, near: null, act: null };
+  el('feed-title').textContent = folder.name;
+  el('feed-count').textContent = '';
+  el('feed-q').textContent = '⚙ ' + prefLabel(getQualityPref(folderId));
+  updateMuteBtn();
+  const scroll = el('feed-scroll');
+  scroll.innerHTML = '';
+  videos.forEach((v, i) => scroll.appendChild(buildFeedItem(v, i)));
+  ov.style.display = 'block';
+  document.body.style.overflow = 'hidden';
+  const start = Math.max(0, videos.findIndex(v => v.id === startId));
+  scroll.children[start].scrollIntoView({ block: 'start' });
+  feed.near = new IntersectionObserver(onNear, { root: scroll, rootMargin: '100% 0px' });
+  feed.act = new IntersectionObserver(onActive, { root: scroll, threshold: 0.6 });
+  for (const sec of scroll.children) { feed.near.observe(sec); feed.act.observe(sec); }
+}
+
+// (Old single-video player — kept for reference; rows now open the feed.)
 async function openPlayer(videoId) {
   currentVideo = getVideo(videoId);
   currentVariantIndex = currentVideo.variants.length - 1;
