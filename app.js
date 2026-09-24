@@ -14,6 +14,7 @@ const CONFIG = {
   enableApiLogin: false,
   includeAuthors: false,
   fxPath: '/fx/2/status/',
+  videoProxyPath: '/video-proxy', // see Worker snippet — proxies video bytes to dodge Safari's <video> referrer bug
   maxPages: 8,
 };
 
@@ -320,6 +321,13 @@ function normalizeMediaUrl(u) {
   if (u.startsWith('/')) return CONFIG.apiBase.replace(/\/$/, '') + u;
   return 'https://' + u;
 }
+// Safari doesn't honor referrerpolicy="no-referrer" on <video>/<audio>
+// (it does on <img> and fetch()), so the CDN still sees our page as the
+// referrer and 403s. Routing playback through our own Worker sidesteps
+// this entirely — the Worker's outgoing request has no browser referrer.
+function proxiedVideoUrl(u) {
+  return `${CONFIG.apiBase.replace(/\/$/, '')}${CONFIG.videoProxyPath}?u=${encodeURIComponent(u)}`;
+}
 function fxToRecord(st) {
   const v = (st.media?.videos || [])[0];
   if (!v) return null;
@@ -402,6 +410,77 @@ function setStatus(msg, isError = false) {
   st.style.color = isError ? '#e5484d' : '';
 }
 
+// ---------------------------------------------------------------------
+// BACKUP / RESTORE — Safari can evict localStorage for an installed web
+// app after roughly a week of inactivity (a known WebKit storage-eviction
+// policy), so this data shouldn't live only in localStorage. Export
+// writes everything (folders + video library) to a JSON file the user
+// saves wherever they like (Files app, iCloud Drive, etc.); Import reads
+// it back. Tokens are intentionally excluded — re-login is cheap and a
+// backup file is more likely to be shared/lost than localStorage itself.
+// ---------------------------------------------------------------------
+function backupData() {
+  const payload = {
+    kind: 'reel-backup',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    folders: loadCustomFolders(),
+    videos: getVideoList(),
+    seenIds: JSON.parse(localStorage.getItem('reel_seen_ids') || '[]'),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `reel-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function restoreFromPayload(payload) {
+  if (!payload || payload.kind !== 'reel-backup' || !Array.isArray(payload.videos) || !Array.isArray(payload.folders)) {
+    throw new Error('فایل بکاپ معتبر نیست');
+  }
+  // Merge (don't wipe): existing local data + anything new from the backup,
+  // deduped by id, so restoring never loses items added since the backup.
+  const existingVideos = getVideoList();
+  const knownIds = new Set(existingVideos.map(v => v.id));
+  const mergedVideos = [...existingVideos, ...payload.videos.filter(v => !knownIds.has(v.id))];
+  localStorage.setItem('reel_video_store', JSON.stringify(mergedVideos));
+
+  const existingFolders = loadCustomFolders();
+  const knownFolderIds = new Set(existingFolders.map(f => f.id));
+  const mergedFolders = [...existingFolders, ...payload.folders.filter(f => !knownFolderIds.has(f.id))];
+  saveCustomFolders(mergedFolders);
+
+  const existingSeen = new Set(JSON.parse(localStorage.getItem('reel_seen_ids') || '[]'));
+  (payload.seenIds || []).forEach(id => existingSeen.add(id));
+  localStorage.setItem('reel_seen_ids', JSON.stringify([...existingSeen]));
+
+  return { videos: mergedVideos.length, folders: mergedFolders.length };
+}
+
+function restoreFlow() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'application/json,.json';
+  input.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const r = restoreFromPayload(JSON.parse(text));
+      renderFolders();
+      setStatus(`بازیابی شد — ${r.videos} ویدیو، ${r.folders} فولدر (ادغام با داده‌ی فعلی).`);
+    } catch (e) {
+      console.error(e);
+      setStatus('خطا در بازیابی: ' + e.message, true);
+    }
+  });
+  input.click();
+}
+
 async function runSync() {
   if (isDemo() || isLocal() || syncing) return;
   syncing = true;
@@ -432,11 +511,15 @@ function ensureToolbar() {
       <button id="new-folder-btn" style="${BTN_STYLE}">+ فولدر جدید</button>
       <button id="add-link-btn" style="${BTN_STYLE}">🔗 افزودن با لینک</button>
       <button id="sync-btn" style="${BTN_STYLE}">↻ همگام‌سازی</button>
+      <button id="backup-btn" style="${BTN_STYLE}">💾 بکاپ</button>
+      <button id="restore-btn" style="${BTN_STYLE}">📥 بازیابی</button>
       <div id="sync-status" style="flex-basis:100%;font-size:12px;opacity:.85;white-space:pre-wrap"></div>`;
     el('folder-grid').insertAdjacentElement('beforebegin', bar);
     el('new-folder-btn').addEventListener('click', createFolder);
     el('sync-btn').addEventListener('click', runSync);
     el('add-link-btn').addEventListener('click', addLinksFlow);
+    el('backup-btn').addEventListener('click', backupData);
+    el('restore-btn').addEventListener('click', restoreFlow);
   }
   const mode = isDemo() ? 'demo' : isLocal() ? 'local' : 'api';
   if (bar.dataset.mode !== mode) { bar.dataset.mode = mode; setStatus(''); }
@@ -444,6 +527,8 @@ function ensureToolbar() {
   el('new-folder-btn').style.display = hide ? 'none' : '';
   el('sync-btn').style.display = (hide || isLocal()) ? 'none' : '';
   el('add-link-btn').style.display = hide ? 'none' : '';
+  el('backup-btn').style.display = hide ? 'none' : '';
+  el('restore-btn').style.display = hide ? 'none' : '';
 }
 function renderFolderActions() {
   let box = el('folder-actions');
@@ -564,8 +649,8 @@ async function loadVariant(index, resumeAt = 0) {
   const variant = currentVideo.variants[index];
   const videoEl = el('video-el');
   const cachedUrl = await getCachedUrl(variant.url);
-  videoEl.referrerPolicy = 'no-referrer'; // belt-and-suspenders alongside the HTML attribute
-  videoEl.src = cachedUrl || variant.url;
+  videoEl.referrerPolicy = 'no-referrer'; // kept as a harmless no-op fallback; the real fix is the proxy below
+  videoEl.src = cachedUrl || proxiedVideoUrl(variant.url);
   videoEl.currentTime = resumeAt;
   videoEl.play().catch((e) => console.warn('autoplay blocked or failed:', e.message));
   el('cache-btn').textContent = cachedUrl ? 'ذخیره‌شده ✓' : 'ذخیره برای آفلاین';
