@@ -8,7 +8,7 @@
 // may evict this entire cache to reclaim space. That's a platform limit,
 // not a bug here — there's no API to prevent it in a home-screen PWA.
 
-const SHELL_CACHE = 'reel-shell-v1';
+const SHELL_CACHE = 'reel-shell-v2'; // bumped so the old (stale, cache-first) shell cache gets evicted once
 const VIDEO_CACHE = 'reel-video-cache-v1'; // must match CACHE_NAME in app.js
 
 const SHELL_FILES = [
@@ -49,10 +49,20 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // App shell: cache-first, so the UI opens even with zero connectivity
+  // App shell: network-first. During active development this matters a
+  // lot — cache-first would keep serving yesterday's index.html/app.js
+  // forever, even after you push new code, which looked exactly like
+  // "my update isn't showing up" (it was showing up, just not to you).
+  // Falls back to cache only when the network is actually unavailable.
   if (SHELL_FILES.some((f) => request.url.endsWith(f.replace('./', '')))) {
     event.respondWith(
-      caches.match(request).then((cached) => cached || fetch(request))
+      fetch(request)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(SHELL_CACHE).then((cache) => cache.put(request, copy));
+          return res;
+        })
+        .catch(() => caches.match(request))
     );
     return;
   }
