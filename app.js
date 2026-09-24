@@ -265,11 +265,8 @@ function explainError(e) {
 }
 function showUsername() {
   const label = isLocal() ? 'حالت رایگان' : (localStorage.getItem('reel_username') ? '@' + localStorage.getItem('reel_username') : null);
-  const root = el('app-screen');
-  if (!label || !root) return;
-  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  let n;
-  while ((n = w.nextNode())) { if (/\byou@\w*/.test(n.nodeValue)) n.nodeValue = n.nodeValue.replace(/\byou@\w*/, label); }
+  const acc = el('account-name'); // <span id="account-name">@you</span> in index.html
+  if (label && acc) acc.textContent = label;
 }
 async function ensureUser() {
   let id = localStorage.getItem('reel_user_id');
