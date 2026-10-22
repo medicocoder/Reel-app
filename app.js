@@ -307,6 +307,80 @@ function editVideoName(videoId) {
   return trimmed;
 }
 
+// ---------------------------------------------------------------------
+// TAG EDITOR — assigns a single (already-saved, already-in-a-folder)
+// video to zero-or-many categories across the three tag axes (People,
+// Companies, Genres). Folders itself is NOT edited here — folder
+// membership stays through the existing add/remove-from-folder flow.
+// Opened from a video row, the feed overlay, or the player screen.
+// ---------------------------------------------------------------------
+function openTagEditor(videoId) {
+  document.getElementById('tag-editor-modal')?.remove();
+  const video = getVideo(videoId);
+  if (!video) return;
+  const axes = TAXONOMIES.filter(t => t.key !== 'folders');
+
+  const sectionHtml = (ax) => {
+    const cats = getCategories(ax.key);
+    const assigned = new Set(cats.filter(c => c.videos.includes(videoId)).map(c => c.id));
+    const pills = cats.map(c => `<button data-id="${c.id}" style="${BTN_STYLE}${assigned.has(c.id) ? ';background:var(--accent);color:#16130A;border-color:var(--accent)' : ''}">${esc(c.name)}</button>`).join('')
+      || `<span style="font-size:12px;color:#5C6472">هنوز ${ax.singular}ی ثبت نشده</span>`;
+    return `
+      <div style="margin-bottom:16px">
+        <div style="font-size:13px;color:#8B93A1;margin-bottom:8px">${ax.label}</div>
+        <div class="tag-pill-row" data-tax="${ax.key}" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${pills}</div>
+        <div style="display:flex;gap:6px">
+          <input type="text" class="tag-new-input" data-tax="${ax.key}" placeholder="+ ${ax.singular} جدید" style="flex:1;min-width:0;background:#1C2027;color:#ECEAE4;border:1px solid #262B33;border-radius:8px;padding:6px 10px;font-size:13px">
+          <button class="tag-new-add" data-tax="${ax.key}" style="${BTN_STYLE}">افزودن</button>
+        </div>
+      </div>`;
+  };
+
+  const modal = document.createElement('div');
+  modal.id = 'tag-editor-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:60;display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:#15181D;border:1px solid #262B33;border-radius:14px;padding:20px;max-width:360px;width:100%;max-height:80vh;overflow-y:auto">
+      <div style="font-size:15px;margin-bottom:14px">تگ‌های ویدیو — ${esc(video.author)}</div>
+      ${axes.map(sectionHtml).join('')}
+      <button id="tag-editor-close" style="${BTN_STYLE};width:100%;margin-top:4px;background:var(--accent);color:#16130A;border:none">بستن</button>
+    </div>`;
+  document.body.appendChild(modal);
+
+  // toggle membership by tapping a pill
+  modal.querySelectorAll('.tag-pill-row button[data-id]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const taxKey = btn.closest('.tag-pill-row').dataset.tax;
+      const cats = getCategories(taxKey);
+      const cat = cats.find(c => c.id === btn.dataset.id);
+      if (!cat) return;
+      const has = cat.videos.includes(videoId);
+      cat.videos = has ? cat.videos.filter(id => id !== videoId) : [videoId, ...cat.videos];
+      saveCategories(taxKey, cats);
+      const active = !has;
+      btn.style.cssText = `${BTN_STYLE}${active ? ';background:var(--accent);color:#16130A;border-color:var(--accent)' : ''}`;
+    });
+  });
+
+  // create a brand-new category in one axis and assign this video to it immediately
+  modal.querySelectorAll('.tag-new-add').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const taxKey = btn.dataset.tax;
+      const input = modal.querySelector(`.tag-new-input[data-tax="${taxKey}"]`);
+      const name = input.value.trim();
+      if (!name) return;
+      const cats = getCategories(taxKey);
+      let cat = cats.find(c => c.name === name);
+      if (!cat) { cat = { id: newFolderId(), name, videos: [] }; cats.push(cat); }
+      if (!cat.videos.includes(videoId)) cat.videos.unshift(videoId);
+      saveCategories(taxKey, cats);
+      openTagEditor(videoId); // re-render with the new pill shown as active
+    });
+  });
+
+  el('tag-editor-close').onclick = () => { modal.remove(); renderFolders(); };
+}
+
 async function httpError(label, res) {
   const body = await res.text().catch(() => '');
   const e = new Error(`${label} failed: ${res.status} ${body}`);
@@ -460,7 +534,10 @@ async function addLinksFlow() {
   setStatus('در حال دریافت اطلاعات ویدیو…');
   const r = await importLinks(text);
   setStatus(r.msg);
-  if (r.ids.length) addToFolderFlow(r.ids);
+  // Videos added via link always land in Folders first, regardless of
+  // which tab happens to be active — People/Companies/Genres are tags
+  // applied afterward (via the tag editor), never the primary container.
+  if (r.ids.length) addToFolderFlow(r.ids, 'folders');
 }
 
 let syncing = false;
@@ -748,7 +825,7 @@ function renderFeed(videoIds) {
         <video playsinline muted loop referrerpolicy="no-referrer" data-loaded="0"></video>
         <button class="feed-mute-btn" data-act="mute">🔇</button>
         <div class="feed-overlay">
-          <div class="feed-author">${esc(v.author)}<span class="feed-name" data-id="${v.id}" style="color:var(--accent);cursor:pointer">${name ? '🏷 ' + esc(name) : '+ نام'}</span></div>
+          <div class="feed-author">${esc(v.author)}<span class="feed-name" data-id="${v.id}" style="color:var(--accent);cursor:pointer">${name ? '📝 ' + esc(name) : '+ نام'}</span><span class="feed-tag-btn" data-id="${v.id}" style="color:var(--accent);cursor:pointer">🏷 تگ‌ها</span></div>
           <div class="feed-text">${esc(v.text)}</div>
           <div class="feed-quality-row">${v.variants.map(q => `<button data-label="${esc(q.label)}">${esc(q.label)}</button>`).join('')}</div>
         </div>
@@ -783,7 +860,11 @@ function renderFeed(videoIds) {
     item.querySelector('.feed-name').addEventListener('click', (ev) => {
       ev.stopPropagation();
       const n = editVideoName(video.id);
-      if (n !== null) ev.currentTarget.textContent = n ? '🏷 ' + n : '+ نام';
+      if (n !== null) ev.currentTarget.textContent = n ? '📝 ' + n : '+ نام';
+    });
+    item.querySelector('.feed-tag-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openTagEditor(video.id);
     });
 
     videoEl.addEventListener('click', () => { videoEl.paused ? videoEl.play().catch(() => {}) : videoEl.pause(); });
@@ -878,7 +959,7 @@ async function openFolder(folderId, taxKey = currentTaxonomy) {
         <div class="video-meta">
           <div class="author">${esc(v.author)}${name ? ' · <span style="color:var(--accent)">' + esc(name) + '</span>' : ''}</div>
           <div class="text">${esc(v.text)}</div>
-          <div class="meta-row"><span>${v.variants.length} کیفیت موجود</span><button class="name-edit-btn" data-id="${v.id}" style="${BTN_STYLE};padding:2px 8px;font-size:11px">${name ? '✎' : '+ نام'}</button>${rowActionBtn(v.id)}</div>
+          <div class="meta-row"><span>${v.variants.length} کیفیت موجود</span><button class="name-edit-btn" data-id="${v.id}" style="${BTN_STYLE};padding:2px 8px;font-size:11px">${name ? '✎' : '+ نام'}</button><button class="tag-edit-btn" data-id="${v.id}" style="${BTN_STYLE};padding:2px 8px;font-size:11px">🏷 تگ‌ها</button>${rowActionBtn(v.id)}</div>
         </div></div>`;
   }));
   list.innerHTML = rows.join('');
@@ -893,6 +974,10 @@ async function openFolder(folderId, taxKey = currentTaxonomy) {
     const n = editVideoName(btn.dataset.id);
     if (n !== null) openFolder(currentFolder.id, currentFolder.taxonomy); // simplest correct refresh
   }));
+  list.querySelectorAll('.tag-edit-btn').forEach(btn => btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    openTagEditor(btn.dataset.id);
+  }));
 }
 
 async function openPlayer(videoId) {
@@ -902,6 +987,7 @@ async function openPlayer(videoId) {
   el('player-screen').classList.add('active');
   el('player-caption').textContent = `${currentVideo.author} — ${currentVideo.text}`;
   el('open-x-btn').onclick = () => window.open(currentVideo.tweetUrl, '_blank', 'noopener');
+  el('tag-btn').onclick = () => openTagEditor(currentVideo.id);
   renderQualitySelect();
   await loadVariant(currentVariantIndex);
   updateNetHint();
@@ -1083,8 +1169,8 @@ async function bootstrap() {
       setStatus(r.msg);
       if (r.ids.length) {
         const folderName = (params.get('folder') || '').trim();
-        if (folderName) addToFolderByName(r.ids, folderName);
-        else addToFolderFlow(r.ids);
+        if (folderName) addToFolderByName(r.ids, folderName, 'folders');
+        else addToFolderFlow(r.ids, 'folders'); // same rule: Shortcuts import always lands in Folders first
       }
     }
   }
