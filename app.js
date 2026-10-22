@@ -169,81 +169,142 @@ function getVideoList() { try { return JSON.parse(localStorage.getItem('reel_vid
 function getAllVideos() { if (isDemo()) return MOCK_VIDEOS; return Object.fromEntries(getVideoList().map(v => [v.id, v])); }
 function getVideo(id) { return getAllVideos()[id]; }
 
-function loadCustomFolders() { try { return JSON.parse(localStorage.getItem('reel_folders') || '[]'); } catch { return []; } }
-function saveCustomFolders(list) { localStorage.setItem('reel_folders', JSON.stringify(list)); }
-function loadFolderMap() {
-  if (isDemo()) return MOCK_FOLDERS;
+// ---------------------------------------------------------------------
+// TAXONOMIES — generalized "folders". The same shared video pool can be
+// classified along 4 independent axes at once (a video can be in a
+// folder AND under a person AND a genre, simultaneously). Each axis
+// holds its own list of categories, same shape as the old folder list.
+// ---------------------------------------------------------------------
+const TAXONOMIES = [
+  { key: 'folders', label: 'فولدرها', singular: 'فولدر', builtinAll: true },
+  { key: 'people', label: 'افراد', singular: 'فرد' },
+  { key: 'companies', label: 'شرکت‌ها', singular: 'شرکت' },
+  { key: 'genres', label: 'ژانرها', singular: 'ژانر' },
+];
+let currentTaxonomy = localStorage.getItem('reel_active_taxonomy') || 'folders';
+
+function getAllTaxonomies() { try { return JSON.parse(localStorage.getItem('reel_taxonomies') || '{}'); } catch { return {}; } }
+function saveAllTaxonomies(obj) { localStorage.setItem('reel_taxonomies', JSON.stringify(obj)); }
+
+// One-time migration: old single-axis `reel_folders` → `reel_taxonomies.folders`.
+// No data loss; runs once, is a no-op on every later load.
+function migrateFoldersToTaxonomies() {
+  const existing = getAllTaxonomies();
+  if (existing.folders) return;
+  let oldFolders = [];
+  try { oldFolders = JSON.parse(localStorage.getItem('reel_folders') || '[]'); } catch {}
+  existing.folders = oldFolders;
+  existing.people = existing.people || [];
+  existing.companies = existing.companies || [];
+  existing.genres = existing.genres || [];
+  saveAllTaxonomies(existing);
+}
+
+function getCategories(taxKey) { return getAllTaxonomies()[taxKey] || []; }
+function saveCategories(taxKey, list) { const all = getAllTaxonomies(); all[taxKey] = list; saveAllTaxonomies(all); }
+function taxDef(taxKey) { return TAXONOMIES.find(t => t.key === taxKey) || TAXONOMIES[0]; }
+
+function loadFolderMap(taxKey = currentTaxonomy) {
+  if (isDemo()) return taxKey === 'folders' ? MOCK_FOLDERS : [];
   const list = getVideoList();
   const known = new Set(list.map(v => v.id));
-  const custom = loadCustomFolders().map(f => ({ ...f, videos: f.videos.filter(id => known.has(id)) }));
-  return [{ id: 'all', name: 'همه ویدیوها', videos: list.map(v => v.id), builtin: true }, ...custom];
+  const custom = getCategories(taxKey).map(f => ({ ...f, videos: f.videos.filter(id => known.has(id)), taxonomy: taxKey }));
+  if (taxDef(taxKey).builtinAll) {
+    return [{ id: 'all', name: 'همه ویدیوها', videos: list.map(v => v.id), builtin: true, taxonomy: taxKey }, ...custom];
+  }
+  return custom;
 }
 function newFolderId() { return 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-function addToFolderByName(ids, name) {
-  const folders = loadCustomFolders();
-  let f = folders.find(x => x.name === name);
-  if (!f) { f = { id: newFolderId(), name, videos: [] }; folders.push(f); }
+
+// Used by ?add=...&folder=Name (the iOS Shortcut path) — always targets
+// the "folders" axis, since that's the one the save-time flow knows about.
+function addToFolderByName(ids, name, taxKey = 'folders') {
+  const categories = getCategories(taxKey);
+  let f = categories.find(x => x.name === name);
+  if (!f) { f = { id: newFolderId(), name, videos: [] }; categories.push(f); }
   for (const id of ids) if (!f.videos.includes(id)) f.videos.unshift(id);
-  saveCustomFolders(folders);
+  saveCategories(taxKey, categories);
   renderFolders();
   return f;
 }
-function createFolder() {
-  const name = (prompt('اسم فولدر جدید:') || '').trim();
+
+function createFolder(taxKey = currentTaxonomy) {
+  const name = (prompt(`اسم ${taxDef(taxKey).singular} جدید:`) || '').trim();
   if (!name) return null;
-  const list = loadCustomFolders();
+  const list = getCategories(taxKey);
   const f = { id: newFolderId(), name, videos: [] };
   list.push(f);
-  saveCustomFolders(list);
+  saveCategories(taxKey, list);
   renderFolders();
   return f;
 }
-function renameFolder(id) {
-  const list = loadCustomFolders();
+function renameFolder(id, taxKey = currentFolder?.taxonomy || currentTaxonomy) {
+  const list = getCategories(taxKey);
   const f = list.find(x => x.id === id);
   if (!f) return;
-  const name = (prompt('اسم جدید فولدر:', f.name) || '').trim();
+  const name = (prompt(`اسم جدید ${taxDef(taxKey).singular}:`, f.name) || '').trim();
   if (!name) return;
   f.name = name;
-  saveCustomFolders(list);
+  saveCategories(taxKey, list);
   el('folder-title').textContent = name;
   renderFolders();
 }
-function deleteFolder(id) {
-  const f = loadCustomFolders().find(x => x.id === id);
-  if (!f || !confirm(`فولدر «${f.name}» حذف بشه؟ (ویدیوها حذف نمیشن، فقط فولدر)`)) return;
-  saveCustomFolders(loadCustomFolders().filter(x => x.id !== id));
+function deleteFolder(id, taxKey = currentFolder?.taxonomy || currentTaxonomy) {
+  const f = getCategories(taxKey).find(x => x.id === id);
+  if (!f || !confirm(`${taxDef(taxKey).singular} «${f.name}» حذف بشه؟ (ویدیوها حذف نمیشن)`)) return;
+  saveCategories(taxKey, getCategories(taxKey).filter(x => x.id !== id));
   renderFolders();
   el('back-to-folders').click();
 }
-function addToFolderFlow(videoIds) {
+function addToFolderFlow(videoIds, taxKey = currentFolder?.taxonomy || currentTaxonomy) {
   const ids = [].concat(videoIds);
-  let folders = loadCustomFolders();
-  const lines = folders.map((f, i) => `${i + 1}) ${f.name}`).join('\n');
-  const ans = prompt(`افزودن به کدوم فولدر؟ شماره رو بنویس:\n${lines}\n0) ساخت فولدر جدید`, folders.length ? '1' : '0');
+  let categories = getCategories(taxKey);
+  const label = taxDef(taxKey).singular;
+  const lines = categories.map((f, i) => `${i + 1}) ${f.name}`).join('\n');
+  const ans = prompt(`افزودن به کدوم ${label}؟ شماره را بنویس:\n${lines}\n0) ساخت ${label} جدید`, categories.length ? '1' : '0');
   if (ans === null) return;
   const n = parseInt(ans, 10);
   let target;
   if (n === 0) {
-    const created = createFolder();
+    const created = createFolder(taxKey);
     if (!created) return;
-    folders = loadCustomFolders();
-    target = folders.find(f => f.id === created.id);
-  } else { target = folders[n - 1]; }
+    categories = getCategories(taxKey);
+    target = categories.find(f => f.id === created.id);
+  } else { target = categories[n - 1]; }
   if (!target) return;
   for (const id of ids) if (!target.videos.includes(id)) target.videos.unshift(id);
-  saveCustomFolders(folders);
+  saveCategories(taxKey, categories);
   renderFolders();
   alert(`${ids.length} ویدیو به «${target.name}» اضافه شد`);
 }
-function removeFromFolder(folderId, videoId) {
-  const folders = loadCustomFolders();
-  const f = folders.find(x => x.id === folderId);
+function removeFromFolder(folderId, videoId, taxKey = currentFolder?.taxonomy || currentTaxonomy) {
+  const categories = getCategories(taxKey);
+  const f = categories.find(x => x.id === folderId);
   if (!f) return;
   f.videos = f.videos.filter(id => id !== videoId);
-  saveCustomFolders(folders);
+  saveCategories(taxKey, categories);
   renderFolders();
-  openFolder(folderId);
+  openFolder(folderId, taxKey);
+}
+
+// ---------------------------------------------------------------------
+// NAME TAG — optional free-text label per video, independent of the
+// taxonomies above. Never required at save/import time.
+// ---------------------------------------------------------------------
+function getVideoNames() { try { return JSON.parse(localStorage.getItem('reel_video_names') || '{}'); } catch { return {}; } }
+function setVideoName(videoId, name) {
+  const o = getVideoNames();
+  if (!name) delete o[videoId]; else o[videoId] = name;
+  localStorage.setItem('reel_video_names', JSON.stringify(o));
+}
+// Returns the new name (possibly ''), or null if the user cancelled.
+function editVideoName(videoId) {
+  const current = getVideoNames()[videoId] || '';
+  const name = prompt('نام دلخواه برای این ویدیو (اختیاری):', current);
+  if (name === null) return null;
+  const trimmed = name.trim();
+  setVideoName(videoId, trimmed);
+  return trimmed;
 }
 
 async function httpError(label, res) {
@@ -265,8 +326,11 @@ function explainError(e) {
 }
 function showUsername() {
   const label = isLocal() ? 'حالت رایگان' : (localStorage.getItem('reel_username') ? '@' + localStorage.getItem('reel_username') : null);
-  const acc = el('account-name'); // <span id="account-name">@you</span> in index.html
-  if (label && acc) acc.textContent = label;
+  const root = el('app-screen');
+  if (!label || !root) return;
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = w.nextNode())) { if (/\byou@\w*/.test(n.nodeValue)) n.nodeValue = n.nodeValue.replace(/\byou@\w*/, label); }
 }
 async function ensureUser() {
   let id = localStorage.getItem('reel_user_id');
@@ -424,7 +488,6 @@ function backupData() {
     folders: loadCustomFolders(),
     videos: getVideoList(),
     seenIds: JSON.parse(localStorage.getItem('reel_seen_ids') || '[]'),
-    qualityPrefs: loadQualityPrefs(), // default-quality ranges (per folder / global)
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -455,11 +518,6 @@ function restoreFromPayload(payload) {
   const existingSeen = new Set(JSON.parse(localStorage.getItem('reel_seen_ids') || '[]'));
   (payload.seenIds || []).forEach(id => existingSeen.add(id));
   localStorage.setItem('reel_seen_ids', JSON.stringify([...existingSeen]));
-
-  // Quality prefs: keep the current device's choices, fill in missing ones from the backup.
-  if (payload.qualityPrefs && typeof payload.qualityPrefs === 'object') {
-    localStorage.setItem('reel_quality_prefs', JSON.stringify({ ...payload.qualityPrefs, ...loadQualityPrefs() }));
-  }
 
   return { videos: mergedVideos.length, folders: mergedFolders.length };
 }
@@ -518,12 +576,16 @@ function ensureToolbar() {
       <button id="restore-btn" style="${BTN_STYLE}">📥 بازیابی</button>
       <div id="sync-status" style="flex-basis:100%;font-size:12px;opacity:.85;white-space:pre-wrap"></div>`;
     el('folder-grid').insertAdjacentElement('beforebegin', bar);
-    el('new-folder-btn').addEventListener('click', createFolder);
-    el('sync-btn').addEventListener('click', runSync);
-    el('add-link-btn').addEventListener('click', addLinksFlow);
-    el('backup-btn').addEventListener('click', backupData);
-    el('restore-btn').addEventListener('click', restoreFlow);
+    // Wrapped in arrow functions so the click Event object is never passed
+    // through as an accidental first argument (createFolder/etc. read that
+    // position as taxKey — passing the raw handler would silently corrupt it).
+    el('new-folder-btn').addEventListener('click', () => createFolder());
+    el('sync-btn').addEventListener('click', () => runSync());
+    el('add-link-btn').addEventListener('click', () => addLinksFlow());
+    el('backup-btn').addEventListener('click', () => backupData());
+    el('restore-btn').addEventListener('click', () => restoreFlow());
   }
+  el('new-folder-btn').textContent = `+ ${taxDef(currentTaxonomy).singular} جدید`;
   const mode = isDemo() ? 'demo' : isLocal() ? 'local' : 'api';
   if (bar.dataset.mode !== mode) { bar.dataset.mode = mode; setStatus(''); }
   const hide = isDemo();
@@ -533,30 +595,24 @@ function ensureToolbar() {
   el('backup-btn').style.display = hide ? 'none' : '';
   el('restore-btn').style.display = hide ? 'none' : '';
 }
-// Folder header buttons: the scroll feed is available for every folder;
-// rename/delete only for user-made folders.
 function renderFolderActions() {
   let box = el('folder-actions');
   if (!box) {
     box = document.createElement('div');
     box.id = 'folder-actions';
-    box.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:8px 0';
+    box.style.cssText = 'display:flex;gap:8px;margin:8px 0';
     el('folder-title').insertAdjacentElement('afterend', box);
   }
-  if (!currentFolder) { box.innerHTML = ''; return; }
-  const canEdit = !isDemo() && !currentFolder.builtin;
-  box.innerHTML = `<button id="feed-open-btn" style="${BTN_STYLE}">▶ نمای اسکرولی</button>` +
-    (canEdit ? `<button id="rename-folder-btn" style="${BTN_STYLE}">تغییر نام</button><button id="delete-folder-btn" style="${BTN_STYLE}">حذف فولدر</button>` : '');
-  el('feed-open-btn').onclick = () => openFeed(currentFolder.id);
-  if (canEdit) {
-    el('rename-folder-btn').onclick = () => renameFolder(currentFolder.id);
-    el('delete-folder-btn').onclick = () => deleteFolder(currentFolder.id);
-  }
+  if (isDemo() || !currentFolder || currentFolder.builtin) { box.innerHTML = ''; return; }
+  box.innerHTML = `<button id="rename-folder-btn" style="${BTN_STYLE}">تغییر نام</button><button id="delete-folder-btn" style="${BTN_STYLE}">حذف فولدر</button>`;
+  el('rename-folder-btn').onclick = () => renameFolder(currentFolder.id);
+  el('delete-folder-btn').onclick = () => deleteFolder(currentFolder.id);
 }
 function rowActionBtn(videoId) {
   if (isDemo()) return '';
   const remove = currentFolder && !currentFolder.builtin;
-  return `<button class="row-act" data-act="${remove ? 'remove' : 'add'}" data-id="${videoId}" style="${BTN_STYLE};padding:3px 8px;font-size:12px;margin-inline-start:auto">${remove ? '✕ حذف از فولدر' : '📁 افزودن به فولدر'}</button>`;
+  const label = taxDef(currentFolder?.taxonomy || currentTaxonomy).singular;
+  return `<button class="row-act" data-act="${remove ? 'remove' : 'add'}" data-id="${videoId}" style="${BTN_STYLE};padding:3px 8px;font-size:12px;margin-inline-start:auto">${remove ? `✕ حذف از ${label}` : `📁 افزودن به ${label}`}</button>`;
 }
 
 let currentFolder = null;
@@ -564,25 +620,251 @@ let currentVideo = null;
 let currentVariantIndex = 0;
 const el = (id) => document.getElementById(id);
 
+// ---------------------------------------------------------------------
+// QUALITY DEFAULT RANGE (for the scroll feed) + PER-VIDEO MANUAL OVERRIDE
+// ---------------------------------------------------------------------
+const QUALITY_LADDER = [240, 360, 480, 720, 1080, 1440, 2160];
+
+function parseResLabel(label) {
+  const m = String(label || '').match(/^(\d+)p/); // matches "480p", ignores "480p (200k)" suffix, "GIF", "832kbps"
+  return m ? +m[1] : null;
+}
+function getQualityRange() {
+  try { return JSON.parse(localStorage.getItem('reel_quality_range')) || { min: 480, max: 720 }; }
+  catch { return { min: 480, max: 720 }; }
+}
+function setQualityRange(range) { localStorage.setItem('reel_quality_range', JSON.stringify(range)); }
+
+// Best variant within [min,max]; if none fall inside the range, clamps to
+// the closest available instead of picking something arbitrary.
+function pickDefaultVariantIndex(variants, range) {
+  const resolved = variants.map((v, i) => ({ i, res: parseResLabel(v.label) }));
+  const withRes = resolved.filter(x => x.res != null);
+  if (!withRes.length) return Math.min(1, variants.length - 1);
+  const inRange = withRes.filter(x => x.res >= range.min && x.res <= range.max);
+  if (inRange.length) return inRange.sort((a, b) => b.res - a.res)[0].i;
+  const below = withRes.filter(x => x.res < range.min).sort((a, b) => b.res - a.res)[0];
+  const above = withRes.filter(x => x.res > range.max).sort((a, b) => a.res - b.res)[0];
+  return (above || below || withRes[0]).i;
+}
+
+function getQualityOverrides() { try { return JSON.parse(localStorage.getItem('reel_quality_override') || '{}'); } catch { return {}; } }
+function setQualityOverride(videoId, label) {
+  const o = getQualityOverrides();
+  if (label == null) delete o[videoId]; else o[videoId] = label;
+  localStorage.setItem('reel_quality_override', JSON.stringify(o));
+}
+function pickVariantIndexForVideo(video) {
+  const label = getQualityOverrides()[video.id];
+  if (label) {
+    const i = video.variants.findIndex(v => v.label === label);
+    if (i !== -1) return i;
+  }
+  return pickDefaultVariantIndex(video.variants, getQualityRange());
+}
+
+function openQualityRangeSettings() {
+  document.getElementById('quality-range-modal')?.remove();
+  const range = getQualityRange();
+  const opts = QUALITY_LADDER.map(q => `<option value="${q}">${q}p</option>`).join('');
+  const modal = document.createElement('div');
+  modal.id = 'quality-range-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:#15181D;border:1px solid #262B33;border-radius:14px;padding:20px;max-width:320px;width:100%">
+      <div style="font-size:15px;margin-bottom:14px">بازه‌ی کیفیت پیش‌فرض برای نمای اسکرول</div>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+        <label style="font-size:12px;color:#8B93A1;flex:1">حداقل</label>
+        <select id="qr-min" style="flex:1;background:#1C2027;color:#ECEAE4;border:1px solid #262B33;border-radius:8px;padding:8px">${opts}</select>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px">
+        <label style="font-size:12px;color:#8B93A1;flex:1">حداکثر</label>
+        <select id="qr-max" style="flex:1;background:#1C2027;color:#ECEAE4;border:1px solid #262B33;border-radius:8px;padding:8px">${opts}</select>
+      </div>
+      <div style="font-size:11px;color:#5C6472;margin-bottom:14px">این فقط دیفالته. برای هر ویدیو جدا هم می‌تونی توی نمای اسکرول کیفیت رو دستی عوض کنی.</div>
+      <div style="display:flex;gap:10px">
+        <button id="qr-cancel" style="${BTN_STYLE};flex:1">انصراف</button>
+        <button id="qr-save" style="${BTN_STYLE};flex:1;background:var(--accent);color:#16130A;border:none">ذخیره</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  el('qr-min').value = String(range.min);
+  el('qr-max').value = String(range.max);
+  el('qr-cancel').onclick = () => modal.remove();
+  el('qr-save').onclick = () => {
+    let min = Number(el('qr-min').value), max = Number(el('qr-max').value);
+    if (min > max) [min, max] = [max, min];
+    setQualityRange({ min, max });
+    modal.remove();
+    if (currentFolder) renderFeed(currentFolder.videos);
+  };
+}
+
+// ---------------------------------------------------------------------
+// LIST vs SCROLL-FEED VIEW TOGGLE
+// ---------------------------------------------------------------------
+function renderViewToggle() {
+  let box = el('view-toggle');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'view-toggle';
+    box.style.cssText = 'display:flex;gap:8px;margin:10px 0 14px';
+    el('folder-actions').insertAdjacentElement('afterend', box);
+  }
+  const view = localStorage.getItem('reel_view_mode') || 'list';
+  const activeStyle = ';background:var(--accent);color:#16130A;border-color:var(--accent)';
+  box.innerHTML = `
+    <button id="view-list-btn" style="${BTN_STYLE}${view === 'list' ? activeStyle : ''}">▤ لیست</button>
+    <button id="view-feed-btn" style="${BTN_STYLE}${view === 'feed' ? activeStyle : ''}">▥ اسکرول</button>
+    <button id="quality-range-btn" style="${BTN_STYLE};margin-inline-start:auto">⚙ کیفیت پیش‌فرض</button>`;
+  el('view-list-btn').onclick = () => setViewMode('list');
+  el('view-feed-btn').onclick = () => setViewMode('feed');
+  el('quality-range-btn').onclick = () => openQualityRangeSettings();
+  applyViewMode(view);
+}
+function setViewMode(mode) { localStorage.setItem('reel_view_mode', mode); renderViewToggle(); }
+function applyViewMode(mode) {
+  el('video-list').classList.toggle('hidden', mode !== 'list');
+  el('video-feed').classList.toggle('active', mode === 'feed');
+  if (mode === 'feed' && currentFolder) renderFeed(currentFolder.videos);
+}
+
+// ---------------------------------------------------------------------
+// SCROLL FEED — one video per screen, snap-scroll, auto play/pause by
+// visibility (IntersectionObserver), lazy-loaded src, per-item quality
+// pills and name-tag editing.
+// ---------------------------------------------------------------------
+let feedObserver = null;
+
+function renderFeed(videoIds) {
+  const feed = el('video-feed');
+  if (feedObserver) { feedObserver.disconnect(); feedObserver = null; }
+
+  feed.innerHTML = videoIds.map((vid) => {
+    const v = getVideo(vid);
+    const name = getVideoNames()[v.id];
+    return `
+      <div class="feed-item" data-id="${v.id}">
+        <video playsinline muted loop referrerpolicy="no-referrer" data-loaded="0"></video>
+        <button class="feed-mute-btn" data-act="mute">🔇</button>
+        <div class="feed-overlay">
+          <div class="feed-author">${esc(v.author)}<span class="feed-name" data-id="${v.id}" style="color:var(--accent);cursor:pointer">${name ? '🏷 ' + esc(name) : '+ نام'}</span></div>
+          <div class="feed-text">${esc(v.text)}</div>
+          <div class="feed-quality-row">${v.variants.map(q => `<button data-label="${esc(q.label)}">${esc(q.label)}</button>`).join('')}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  feed.querySelectorAll('.feed-item').forEach((item) => {
+    const video = getVideo(item.dataset.id);
+    const videoEl = item.querySelector('video');
+    const idx = pickVariantIndexForVideo(video);
+    highlightActivePill(item, video.variants[idx].label);
+
+    item.querySelectorAll('.feed-quality-row button').forEach((btn) => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        setQualityOverride(video.id, btn.dataset.label);
+        highlightActivePill(item, btn.dataset.label);
+        const t = videoEl.currentTime;
+        const wasPlaying = !videoEl.paused;
+        await setFeedItemSource(item, video, btn.dataset.label);
+        videoEl.currentTime = t;
+        if (wasPlaying) videoEl.play().catch(() => {});
+      });
+    });
+
+    item.querySelector('[data-act="mute"]').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      videoEl.muted = !videoEl.muted;
+      ev.currentTarget.textContent = videoEl.muted ? '🔇' : '🔊';
+    });
+
+    item.querySelector('.feed-name').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const n = editVideoName(video.id);
+      if (n !== null) ev.currentTarget.textContent = n ? '🏷 ' + n : '+ نام';
+    });
+
+    videoEl.addEventListener('click', () => { videoEl.paused ? videoEl.play().catch(() => {}) : videoEl.pause(); });
+  });
+
+  feedObserver = new IntersectionObserver((entries) => {
+    entries.forEach(async (entry) => {
+      const item = entry.target;
+      const videoEl = item.querySelector('video');
+      if (entry.isIntersecting && entry.intersectionRatio > 0.6) {
+        if (videoEl.dataset.loaded === '0') {
+          const video = getVideo(item.dataset.id);
+          const idx = pickVariantIndexForVideo(video);
+          await setFeedItemSource(item, video, video.variants[idx].label);
+          videoEl.dataset.loaded = '1';
+        }
+        videoEl.play().catch(() => {});
+      } else {
+        videoEl.pause();
+      }
+    });
+  }, { threshold: [0, 0.6, 1] });
+  feed.querySelectorAll('.feed-item').forEach((item) => feedObserver.observe(item));
+}
+
+function highlightActivePill(item, label) {
+  item.querySelectorAll('.feed-quality-row button').forEach((b) => b.classList.toggle('active', b.dataset.label === label));
+}
+
+async function setFeedItemSource(item, video, label) {
+  const variant = video.variants.find((v) => v.label === label) || video.variants[0];
+  const videoEl = item.querySelector('video');
+  const cachedUrl = await getCachedUrl(variant.url);
+  videoEl.src = cachedUrl || proxiedVideoUrl(variant.url);
+}
+
+function renderTabBar() {
+  let bar = el('tab-bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'tab-bar';
+    bar.style.cssText = 'display:flex;gap:6px;margin-bottom:16px;overflow-x:auto;';
+    el('folders-view').insertAdjacentElement('afterbegin', bar);
+  }
+  bar.classList.remove('hidden');
+  const activeStyle = ';background:var(--accent);color:#16130A;border-color:var(--accent)';
+  bar.innerHTML = TAXONOMIES.map(t =>
+    `<button data-key="${t.key}" style="${BTN_STYLE}${t.key === currentTaxonomy ? activeStyle : ''};white-space:nowrap;flex-shrink:0">${t.label}</button>`
+  ).join('');
+  bar.querySelectorAll('button').forEach(btn => btn.addEventListener('click', () => {
+    currentTaxonomy = btn.dataset.key;
+    localStorage.setItem('reel_active_taxonomy', currentTaxonomy);
+    renderFolders();
+  }));
+}
+
 function renderFolders() {
   const grid = el('folder-grid');
-  const folders = loadFolderMap();
+  const folders = loadFolderMap(currentTaxonomy);
   ensureToolbar();
-  el('folder-total').textContent = `${folders.length} فولدر`;
+  renderTabBar();
+  el('folders-section-title').textContent = taxDef(currentTaxonomy).label;
+  el('folder-total').textContent = `${folders.length} دسته`;
   grid.innerHTML = folders.map(f => `
     <div class="folder-card" data-id="${f.id}">
       <div class="perf"></div>
       <div class="count">${f.videos.length}</div>
       <div class="name">${esc(f.name)}</div>
     </div>`).join('');
-  grid.querySelectorAll('.folder-card').forEach(card => card.addEventListener('click', () => openFolder(card.dataset.id)));
+  grid.querySelectorAll('.folder-card').forEach(card => card.addEventListener('click', () => openFolder(card.dataset.id, currentTaxonomy)));
 }
 
-async function openFolder(folderId) {
-  const folders = loadFolderMap();
+async function openFolder(folderId, taxKey = currentTaxonomy) {
+  const folders = loadFolderMap(taxKey);
   currentFolder = folders.find(f => f.id === folderId);
+  currentFolder.taxonomy = taxKey;
+  currentTaxonomy = taxKey;
   el('folder-title').textContent = currentFolder.name;
   renderFolderActions();
+  renderViewToggle();
+  el('tab-bar')?.classList.add('hidden');
   el('folders-view').classList.add('hidden');
   el('videos-view').classList.remove('hidden');
   el('player-screen').classList.remove('active');
@@ -590,324 +872,29 @@ async function openFolder(folderId) {
   const rows = await Promise.all(currentFolder.videos.map(async (vid) => {
     const v = getVideo(vid);
     const cached = await isVideoCached(v);
+    const name = getVideoNames()[v.id];
     return `<div class="video-row" data-id="${v.id}">
         <div class="thumb">▶${cached ? '<span class="cache-badge">کش‌شده</span>' : ''}</div>
         <div class="video-meta">
-          <div class="author">${esc(v.author)}</div>
+          <div class="author">${esc(v.author)}${name ? ' · <span style="color:var(--accent)">' + esc(name) + '</span>' : ''}</div>
           <div class="text">${esc(v.text)}</div>
-          <div class="meta-row"><span>${v.variants.length} کیفیت موجود</span>${rowActionBtn(v.id)}</div>
+          <div class="meta-row"><span>${v.variants.length} کیفیت موجود</span><button class="name-edit-btn" data-id="${v.id}" style="${BTN_STYLE};padding:2px 8px;font-size:11px">${name ? '✎' : '+ نام'}</button>${rowActionBtn(v.id)}</div>
         </div></div>`;
   }));
   list.innerHTML = rows.join('');
-  // Tapping a row now opens the scroll feed at that video.
-  list.querySelectorAll('.video-row').forEach(row => row.addEventListener('click', () => openFeed(currentFolder.id, row.dataset.id)));
+  list.querySelectorAll('.video-row').forEach(row => row.addEventListener('click', () => openPlayer(row.dataset.id)));
   list.querySelectorAll('.row-act').forEach(btn => btn.addEventListener('click', (ev) => {
     ev.stopPropagation();
-    if (btn.dataset.act === 'add') addToFolderFlow(btn.dataset.id); else removeFromFolder(currentFolder.id, btn.dataset.id);
+    if (btn.dataset.act === 'add') addToFolderFlow(btn.dataset.id, currentFolder.taxonomy);
+    else removeFromFolder(currentFolder.id, btn.dataset.id, currentFolder.taxonomy);
+  }));
+  list.querySelectorAll('.name-edit-btn').forEach(btn => btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    const n = editVideoName(btn.dataset.id);
+    if (n !== null) openFolder(currentFolder.id, currentFolder.taxonomy); // simplest correct refresh
   }));
 }
 
-// =====================================================================
-// DEFAULT QUALITY = a resolution RANGE (min..max), per folder or global.
-// Resolution of a variant = its label number ("720p", "720p (2176k)").
-// Rule: pick the BEST variant inside the range; if none fits, the
-// closest one to the range. No preference set → highest quality.
-// =====================================================================
-const RES_MIN_OPTS = [[0, 'بدون حداقل'], [320, '320p'], [360, '360p'], [480, '480p'], [720, '720p'], [1080, '1080p']];
-const RES_MAX_OPTS = [[0, 'بدون سقف'], [360, '360p'], [480, '480p'], [720, '720p'], [1080, '1080p']];
-
-function resOfVariant(v) {
-  if (typeof v.res === 'number') return v.res;
-  const m = String(v.label || '').match(/^(\d{3,4})p/);
-  return m ? +m[1] : null; // GIF / MP4 / kbps labels → unknown
-}
-function pickVariantIndex(variants, pref) {
-  const last = variants.length - 1;
-  if (!pref || (!pref.min && !pref.max)) return last;
-  const min = pref.min || 0, max = pref.max || Infinity;
-  const known = variants.map((v, i) => ({ i, r: resOfVariant(v) })).filter(x => x.r != null);
-  if (!known.length) return last;
-  const inside = known.filter(x => x.r >= min && x.r <= max);
-  if (inside.length) return inside.reduce((a, b) => (b.r >= a.r ? b : a)).i; // best inside the range (ties → higher bitrate)
-  const dist = (x) => (x.r < min ? min - x.r : x.r - max);
-  return known.reduce((a, b) => (dist(b) < dist(a) || (dist(b) === dist(a) && b.r < a.r) ? b : a)).i;
-}
-function loadQualityPrefs() { try { return JSON.parse(localStorage.getItem('reel_quality_prefs') || '{}'); } catch { return {}; } }
-function getQualityPref(folderId) { const p = loadQualityPrefs(); return p[folderId] || p._all || null; }
-function qualityPrefSource(folderId) { const p = loadQualityPrefs(); return p[folderId] ? 'folder' : p._all ? 'all' : null; }
-function saveQualityPref(scope, pref) { // scope = folder id, or '_all'
-  const p = loadQualityPrefs();
-  if (pref) p[scope] = pref; else delete p[scope];
-  localStorage.setItem('reel_quality_prefs', JSON.stringify(p));
-}
-function prefLabel(pref) {
-  if (!pref || (!pref.min && !pref.max)) return 'بالاترین';
-  if (pref.min && pref.max) return `${pref.min}–${pref.max}p`;
-  return pref.max ? `≤${pref.max}p` : `≥${pref.min}p`;
-}
-
-// =====================================================================
-// SCROLL FEED — every video of a folder, one per screen, vertical snap.
-// Only videos near the screen get a src (saves data/memory); the one
-// in view plays, the rest pause. Manual per-video quality overrides the
-// default until you leave the feed.
-// =====================================================================
-const FB = 'background:#ffffff26;color:#fff;border:0;border-radius:999px;padding:7px 12px;font:inherit;font-size:13px;cursor:pointer;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)';
-const FSEL = 'width:100%;margin-top:4px;padding:8px;border-radius:8px;font:inherit;background:#2c2c2e;color:#fff;border:1px solid #ffffff33';
-let feed = null;        // { folderId, videos, picks, active, near, act }
-let feedMuted = false;  // starts with sound; falls back to muted if the browser blocks autoplay
-
-function feedVariantIndex(v) {
-  return feed.picks[v.id] ?? pickVariantIndex(v.variants, getQualityPref(feed.folderId));
-}
-function feedVideoSrc(url) { return isDemo() ? url : proxiedVideoUrl(url); }
-function updateMuteBtn() { el('feed-mute').textContent = feedMuted ? '🔇' : '🔊'; }
-
-function tryPlay(vid) {
-  if (!vid.getAttribute('src')) return; // not loaded yet — feedLoad starts it
-  vid.muted = feedMuted;
-  vid.play().catch((e) => {
-    if (e.name === 'NotAllowedError' && !vid.muted) { feedMuted = true; updateMuteBtn(); vid.muted = true; vid.play().catch(() => {}); }
-  });
-}
-
-async function cacheVariantUrl(url) {
-  const cache = await caches.open(CACHE_NAME);
-  let res;
-  try {
-    res = await fetch(new Request(url, { referrerPolicy: 'no-referrer' }));
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-  } catch (e) { // direct fetch blocked (CORS/403) → go through the Worker
-    res = await fetch(proxiedVideoUrl(url));
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-  }
-  await cache.put(url, res);
-}
-
-async function refreshItemUI(sec) {
-  const v = feed.videos[+sec.dataset.i];
-  const idx = feedVariantIndex(v);
-  sec.querySelector('.fi-q').textContent = '⚙ ' + v.variants[idx].label;
-  sec.querySelector('.fi-variants').innerHTML = v.variants.map((x, j) =>
-    `<button class="fi-var" data-j="${j}" style="${FB};${j === idx ? 'background:#fff;color:#000' : ''}">${esc(x.label)}</button>`).join('');
-  const cached = 'caches' in window && await getCachedUrl(v.variants[idx].url);
-  const sv = sec.querySelector('.fi-save');
-  if (sv) sv.textContent = cached ? '💾 ذخیره‌شده ✓' : '💾 ذخیره آفلاین';
-}
-
-async function feedLoad(sec) {
-  if (!feed) return;
-  const v = feed.videos[+sec.dataset.i];
-  const vid = sec.querySelector('video');
-  const variant = v.variants[feedVariantIndex(v)];
-  if (vid.dataset.url === variant.url) { refreshItemUI(sec); return; }
-  const keep = vid.dataset.url ? vid.currentTime : 0; // quality switch → resume where we were
-  vid.dataset.url = variant.url;
-  vid.preload = 'metadata';
-  const src = (await getCachedUrl(variant.url)) || feedVideoSrc(variant.url);
-  if (!feed || vid.dataset.url !== variant.url) return; // closed or changed meanwhile
-  vid.src = src;
-  if (keep) vid.addEventListener('loadedmetadata', () => { vid.currentTime = keep; }, { once: true });
-  refreshItemUI(sec);
-  if (sec === feed.active) tryPlay(vid);
-}
-function feedUnload(sec) {
-  const vid = sec.querySelector('video');
-  if (!vid.dataset.url) return;
-  vid.pause();
-  vid.removeAttribute('src');
-  vid.load();
-  delete vid.dataset.url;
-}
-
-function buildFeedItem(v, i) {
-  const sec = document.createElement('section');
-  sec.className = 'feed-item';
-  sec.dataset.i = i;
-  sec.style.cssText = 'height:100%;position:relative;scroll-snap-align:start;scroll-snap-stop:always;background:#000;overflow:hidden';
-  sec.innerHTML = `
-    <video playsinline loop preload="none" style="width:100%;height:100%;object-fit:contain;background:#000"></video>
-    <div class="fi-msg" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;font-size:13px;padding:24px;text-align:center;opacity:.85"></div>
-    <div style="position:absolute;left:0;right:0;bottom:0;height:3px;background:#ffffff33"><div class="fi-bar" style="height:100%;width:0;background:#fff"></div></div>
-    <div style="position:absolute;left:0;right:0;bottom:3px;padding:48px 14px calc(14px + env(safe-area-inset-bottom,0px));background:linear-gradient(#0000,#000c);pointer-events:none">
-      <div dir="auto" style="font-weight:600;font-size:14px">${esc(v.author)}</div>
-      <div dir="auto" style="font-size:13px;opacity:.9;max-height:3.9em;overflow:hidden;margin:4px 0 10px">${esc(v.text)}</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;pointer-events:auto">
-        <button class="fi-q" style="${FB}">⚙ کیفیت</button>
-        <button class="fi-save" style="${FB}">💾 ذخیره آفلاین</button>
-        <button class="fi-open" style="${FB}">↗ باز کردن در X</button>
-      </div>
-      <div class="fi-variants" style="display:none;gap:6px;flex-wrap:wrap;margin-top:8px;pointer-events:auto"></div>
-    </div>`;
-  const vid = sec.querySelector('video');
-  const msg = sec.querySelector('.fi-msg');
-  const bar = sec.querySelector('.fi-bar');
-  vid.addEventListener('loadstart', () => { if (vid.getAttribute('src')) msg.textContent = '⏳'; });
-  vid.addEventListener('loadeddata', () => { msg.textContent = ''; });
-  vid.addEventListener('playing', () => { msg.textContent = ''; });
-  vid.addEventListener('timeupdate', () => { bar.style.width = (vid.duration ? (vid.currentTime / vid.duration) * 100 : 0) + '%'; });
-  vid.addEventListener('error', () => {
-    if (!vid.getAttribute('src')) return;
-    msg.textContent = '▲ پخش نشد — ' + (MEDIA_ERROR_MSG[vid.error?.code] || 'خطای نامشخص');
-  });
-  return sec;
-}
-
-function onNear(entries) { for (const e of entries) { if (e.isIntersecting) feedLoad(e.target); else feedUnload(e.target); } }
-function onActive(entries) {
-  if (!feed) return;
-  for (const e of entries) {
-    const vid = e.target.querySelector('video');
-    if (e.isIntersecting) {
-      feed.active = e.target;
-      el('feed-count').textContent = `${+e.target.dataset.i + 1}/${feed.videos.length}`;
-      tryPlay(vid);
-    } else {
-      if (feed.active === e.target) feed.active = null;
-      vid.pause();
-    }
-  }
-}
-
-function feedApplyPref() {
-  el('feed-q').textContent = '⚙ ' + prefLabel(getQualityPref(feed.folderId));
-  for (const sec of el('feed-scroll').children) {
-    if (sec.querySelector('video').dataset.url) feedLoad(sec); // reloads only if the chosen variant changed; manual picks stay
-  }
-}
-function openQualitySheet() {
-  const pref = getQualityPref(feed.folderId) || { min: 0, max: 0 };
-  el('q-min').value = String(pref.min || 0);
-  el('q-max').value = String(pref.max || 0);
-  const src = qualityPrefSource(feed.folderId);
-  el('q-src').textContent = 'تنظیم فعلی: ' + (src === 'folder' ? 'مخصوص این فولدر' : src === 'all' ? 'برای همه فولدرها' : 'تنظیم نشده (بالاترین کیفیت)');
-  el('feed-sheet').style.display = 'block';
-}
-function readSheetPref() {
-  let min = +el('q-min').value, max = +el('q-max').value;
-  if (min && max && min > max) [min, max] = [max, min];
-  return (min || max) ? { min, max } : null;
-}
-
-function ensureFeedOverlay() {
-  let ov = el('reel-feed');
-  if (ov) return ov;
-  ov = document.createElement('div');
-  ov.id = 'reel-feed';
-  ov.style.cssText = 'position:fixed;inset:0;z-index:1000;background:#000;color:#fff;display:none';
-  ov.innerHTML = `
-    <div style="position:absolute;top:0;left:0;right:0;z-index:4;display:flex;gap:8px;align-items:center;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 24px;background:linear-gradient(#000a,#0000);pointer-events:none">
-      <button id="feed-close" style="${FB};pointer-events:auto">✕</button>
-      <div id="feed-title" dir="auto" style="flex:1;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
-      <div id="feed-count" style="font-size:12px;opacity:.85"></div>
-      <button id="feed-mute" style="${FB};pointer-events:auto">🔊</button>
-      <button id="feed-q" style="${FB};pointer-events:auto">⚙ بالاترین</button>
-    </div>
-    <div id="feed-scroll" style="height:100%;overflow-y:scroll;scroll-snap-type:y mandatory;-webkit-overflow-scrolling:touch;overscroll-behavior:contain"></div>
-    <div id="feed-sheet" style="position:absolute;inset:0;z-index:6;display:none;background:#0009">
-      <div style="position:absolute;left:0;right:0;bottom:0;background:#1c1c1e;border-radius:18px 18px 0 0;padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px));max-height:90%;overflow:auto">
-        <div style="font-weight:600;margin-bottom:4px">کیفیت پیش‌فرض (بازه‌ی رزولوشن)</div>
-        <div style="font-size:12px;opacity:.75;margin-bottom:12px">بهترین کیفیتِ داخل بازه انتخاب میشه؛ اگه ویدیویی چنین کیفیتی نداشت، نزدیک‌ترین. برای هر ویدیو می‌تونی دستی عوضش کنی.</div>
-        <div style="display:flex;gap:10px;margin-bottom:8px">
-          <label style="flex:1;font-size:12px">حداقل<select id="q-min" style="${FSEL}">${RES_MIN_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
-          <label style="flex:1;font-size:12px">حداکثر<select id="q-max" style="${FSEL}">${RES_MAX_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
-        </div>
-        <div id="q-src" style="font-size:12px;opacity:.75;margin-bottom:12px"></div>
-        <div style="display:flex;flex-direction:column;gap:8px">
-          <button id="q-save-folder" style="${FB};border-radius:12px;padding:10px">ذخیره برای این فولدر</button>
-          <button id="q-save-all" style="${FB};border-radius:12px;padding:10px">ذخیره برای همه فولدرها</button>
-          <button id="q-reset" style="${FB};border-radius:12px;padding:10px">بازنشانی (بالاترین کیفیت)</button>
-          <button id="q-close" style="${FB};border-radius:12px;padding:10px">بستن</button>
-        </div>
-      </div>
-    </div>`;
-  document.body.appendChild(ov);
-
-  el('feed-close').addEventListener('click', closeFeed);
-  el('feed-mute').addEventListener('click', () => {
-    feedMuted = !feedMuted;
-    updateMuteBtn();
-    const vid = feed?.active?.querySelector('video');
-    if (vid) { vid.muted = feedMuted; if (vid.paused) tryPlay(vid); }
-  });
-  el('feed-q').addEventListener('click', openQualitySheet);
-  el('q-close').addEventListener('click', () => { el('feed-sheet').style.display = 'none'; });
-  const applyAndClose = () => { el('feed-sheet').style.display = 'none'; feedApplyPref(); };
-  el('q-save-folder').addEventListener('click', () => { saveQualityPref(feed.folderId, readSheetPref()); applyAndClose(); });
-  el('q-save-all').addEventListener('click', () => { saveQualityPref('_all', readSheetPref()); saveQualityPref(feed.folderId, null); applyAndClose(); });
-  el('q-reset').addEventListener('click', () => { saveQualityPref('_all', null); saveQualityPref(feed.folderId, null); applyAndClose(); });
-
-  // One delegated click handler for everything inside the feed items.
-  el('feed-scroll').addEventListener('click', async (e) => {
-    const sec = e.target.closest('.feed-item');
-    if (!sec || !feed) return;
-    const v = feed.videos[+sec.dataset.i];
-    const b = e.target.closest('button');
-    if (!b) { // tap on the video = play / pause
-      const vid = sec.querySelector('video');
-      if (vid.paused) tryPlay(vid); else vid.pause();
-      return;
-    }
-    if (b.classList.contains('fi-q')) {
-      const row = sec.querySelector('.fi-variants');
-      row.style.display = row.style.display === 'none' ? 'flex' : 'none';
-    } else if (b.classList.contains('fi-var')) {
-      feed.picks[v.id] = +b.dataset.j; // manual choice for this video only
-      sec.querySelector('.fi-variants').style.display = 'none';
-      feedLoad(sec);
-    } else if (b.classList.contains('fi-open')) {
-      window.open(v.tweetUrl, '_blank', 'noopener');
-    } else if (b.classList.contains('fi-save')) {
-      if (!('caches' in window)) { alert('کش در این مرورگر پشتیبانی نمیشه'); return; }
-      b.textContent = 'در حال ذخیره…';
-      try { await cacheVariantUrl(v.variants[feedVariantIndex(v)].url); } catch (err) { console.error('cache save failed:', err); b.textContent = 'خطا در ذخیره'; return; }
-      refreshItemUI(sec);
-    }
-  });
-  return ov;
-}
-
-function teardownFeed() {
-  if (!feed) return;
-  feed.near.disconnect();
-  feed.act.disconnect();
-  const scroll = el('feed-scroll');
-  scroll.querySelectorAll('video').forEach(v => { v.pause(); v.removeAttribute('src'); v.load(); });
-  scroll.innerHTML = '';
-  el('feed-sheet').style.display = 'none';
-  el('reel-feed').style.display = 'none';
-  document.body.style.overflow = '';
-  feed = null;
-}
-function closeFeed() {
-  teardownFeed();
-  if (currentFolder) openFolder(currentFolder.id); // refresh "cached" badges
-}
-
-function openFeed(folderId, startId) {
-  const folder = loadFolderMap().find(f => f.id === folderId);
-  const videos = (folder?.videos || []).map(getVideo).filter(Boolean);
-  if (!videos.length) { alert('این فولدر ویدیویی نداره'); return; }
-  teardownFeed();
-  const ov = ensureFeedOverlay();
-  feed = { folderId, videos, picks: {}, active: null, near: null, act: null };
-  el('feed-title').textContent = folder.name;
-  el('feed-count').textContent = '';
-  el('feed-q').textContent = '⚙ ' + prefLabel(getQualityPref(folderId));
-  updateMuteBtn();
-  const scroll = el('feed-scroll');
-  scroll.innerHTML = '';
-  videos.forEach((v, i) => scroll.appendChild(buildFeedItem(v, i)));
-  ov.style.display = 'block';
-  document.body.style.overflow = 'hidden';
-  const start = Math.max(0, videos.findIndex(v => v.id === startId));
-  scroll.children[start].scrollIntoView({ block: 'start' });
-  feed.near = new IntersectionObserver(onNear, { root: scroll, rootMargin: '100% 0px' });
-  feed.act = new IntersectionObserver(onActive, { root: scroll, threshold: 0.6 });
-  for (const sec of scroll.children) { feed.near.observe(sec); feed.act.observe(sec); }
-}
-
-// (Old single-video player — kept for reference; rows now open the feed.)
 async function openPlayer(videoId) {
   currentVideo = getVideo(videoId);
   currentVariantIndex = currentVideo.variants.length - 1;
@@ -1011,7 +998,13 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-el('back-to-folders').addEventListener('click', () => { el('videos-view').classList.add('hidden'); el('folders-view').classList.remove('hidden'); });
+el('back-to-folders').addEventListener('click', () => {
+  if (feedObserver) { feedObserver.disconnect(); feedObserver = null; }
+  el('video-feed')?.querySelectorAll('video').forEach(v => v.pause());
+  el('videos-view').classList.add('hidden');
+  el('folders-view').classList.remove('hidden');
+  el('tab-bar')?.classList.remove('hidden');
+});
 el('back-to-videos').addEventListener('click', () => { el('video-el').pause(); el('player-screen').classList.remove('active'); el('videos-view').classList.remove('hidden'); });
 el('login-btn').addEventListener('click', startLogin);
 el('demo-btn').addEventListener('click', () => {
@@ -1049,6 +1042,7 @@ el('logout-btn').addEventListener('click', () => {
 
 async function bootstrap() {
   wireVideoDiagnostics();
+  migrateFoldersToTaxonomies();
   const params = new URLSearchParams(window.location.search);
   if (params.has('code')) {
     const pendingState = localStorage.getItem('pkce_state');
