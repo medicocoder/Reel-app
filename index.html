@@ -5,8 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Reel — بایگانی ویدیوهای بوکمارک‌شده</title>
 <link rel="manifest" href="manifest.json">
-<meta name="mobile-web-app-capable" content="yes">
-<link rel="apple-touch-icon" href="icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0C0E12">
@@ -131,6 +129,40 @@
     border-radius: 12px; padding: 10px; margin-bottom: 10px;
     cursor:pointer;
   }
+
+  /* ---------- Scrollable feed view ---------- */
+  .video-feed{
+    display:none; height: calc(100vh - 260px); min-height: 420px;
+    overflow-y: auto; scroll-snap-type: y mandatory; -webkit-overflow-scrolling: touch;
+    border-radius: var(--radius); background:#000;
+  }
+  .video-feed.active{ display:block; }
+  .feed-item{
+    scroll-snap-align: start; scroll-snap-stop: always;
+    height: 100%; position: relative; background:#000;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .feed-item video{ width:100%; height:100%; object-fit:contain; background:#000; }
+  .feed-mute-btn{
+    position:absolute; top:14px; inset-inline-end:14px;
+    width:34px; height:34px; border-radius:50%;
+    background:rgba(0,0,0,.45); color:#fff; border:none; font-size:15px;
+  }
+  .feed-overlay{
+    position:absolute; inset-inline:0; bottom:0;
+    padding:14px 16px calc(14px + env(safe-area-inset-bottom,0px));
+    background:linear-gradient(transparent, rgba(0,0,0,.75)); color:#fff;
+  }
+  .feed-author{ font-size:13px; opacity:.85; display:flex; align-items:center; gap:8px; }
+  .feed-text{ font-size:14px; margin-top:4px; line-height:1.5; max-height:4.5em; overflow:hidden; }
+  .feed-quality-row{ display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }
+  .feed-quality-row button{
+    appearance:none; border:1px solid rgba(255,255,255,.35);
+    background:rgba(0,0,0,.35); color:#fff; font-size:11.5px;
+    padding:4px 10px; border-radius:999px;
+  }
+  .feed-quality-row button.active{ background:var(--accent); border-color:var(--accent); color:#16130A; font-weight:600; }
+
   .thumb{
     width: 84px; height: 84px; border-radius: 8px; flex-shrink:0;
     background: linear-gradient(135deg, #2A2E36, #171A1F);
@@ -207,7 +239,7 @@
   <main>
     <!-- Folder grid -->
     <div id="folders-view">
-      <div class="section-label">فولدرها <span id="folder-total">۴ فولدر</span></div>
+      <div class="section-label"><span id="folders-section-title">فولدرها</span> <span id="folder-total">۴ فولدر</span></div>
       <div class="folder-grid" id="folder-grid"></div>
     </div>
 
@@ -216,6 +248,7 @@
       <div class="backbar" id="back-to-folders">← بازگشت به فولدرها</div>
       <div class="section-label" id="folder-title">—</div>
       <div id="video-list"></div>
+      <div id="video-feed" class="video-feed"></div>
     </div>
 
     <!-- Player -->
